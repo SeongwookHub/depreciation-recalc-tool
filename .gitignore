@@ -1,0 +1,25 @@
+# Claude Code
+.claude/
+
+# Sensitive / real company data (혹시 모를 실제 데이터 유출 방지)
+*real_data*
+*real*data*
+*실제*
+*company*
+*Company*
+*회사*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
