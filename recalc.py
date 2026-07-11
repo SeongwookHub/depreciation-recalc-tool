@@ -74,6 +74,10 @@ RATE_TABLE = {
 }
 
 
+def classify_materiality(diff: int, threshold: int = MATERIALITY_THRESHOLD) -> str:
+    return "유의한 차이" if abs(diff) >= threshold else "경미한 차이"
+
+
 def get_rate(life: int) -> float:
     if life in RATE_TABLE:
         return RATE_TABLE[life]
@@ -314,7 +318,7 @@ def main():
 
         diff = recalced - reported
         match = "일치" if diff == 0 else "불일치"
-        materiality = "유의한 차이" if abs(diff) >= MATERIALITY_THRESHOLD else "경미한 차이"
+        materiality = classify_materiality(diff)
 
         rows.append({
             "자산명": r[cols["자산명"]],
