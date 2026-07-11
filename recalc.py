@@ -29,6 +29,10 @@ OUT_PATH = r"C:\Users\wh981\재무검증도구\depreciation-recalc-tool\recalc_r
 REF_DATE = dt.date(2025, 12, 31)
 FY_YEAR = REF_DATE.year
 
+# 중요성 기준 금액(원): 회사반영 대비 재계산 차이의 절대값이 이 금액 미만이면
+# "경미한 차이", 이상이면 "유의한 차이"로 구분한다.
+MATERIALITY_THRESHOLD = 1_000_000
+
 # ---------------------------------------------------------------------------
 # 컬럼명 매핑
 # 회사마다 고정자산대장의 컬럼명이 다를 수 있으므로, 실제 파일의 컬럼명을
@@ -310,6 +314,7 @@ def main():
 
         diff = recalced - reported
         match = "일치" if diff == 0 else "불일치"
+        materiality = "유의한 차이" if abs(diff) >= MATERIALITY_THRESHOLD else "경미한 차이"
 
         rows.append({
             "자산명": r[cols["자산명"]],
@@ -330,22 +335,26 @@ def main():
             "재계산_당기감가상각비": recalced,
             "차이(재계산-회사반영)": diff,
             "일치여부": match,
+            "중요성구분": materiality,
         })
 
     result_df = pd.DataFrame(rows)
     diff_df = result_df[result_df["일치여부"] == "불일치"].copy()
     diff_df = diff_df.reindex(diff_df["차이(재계산-회사반영)"].abs().sort_values(ascending=False).index)
+    material_diff_df = diff_df[diff_df["중요성구분"] == "유의한 차이"].copy()
 
     with pd.ExcelWriter(OUT_PATH, engine="openpyxl") as writer:
         result_df.to_excel(writer, sheet_name="재계산결과", index=False)
         diff_df.to_excel(writer, sheet_name="차이자산", index=False)
-        _format_workbook(writer, result_df, diff_df)
+        material_diff_df.to_excel(writer, sheet_name="유의한차이자산", index=False)
+        _format_workbook(writer, result_df, diff_df, material_diff_df)
 
     print("DONE:", OUT_PATH)
-    print(f"기준일: {REF_DATE}, 당기: {FY_YEAR}년, 총 {len(result_df)}건 중 불일치 {len(diff_df)}건")
+    print(f"기준일: {REF_DATE}, 당기: {FY_YEAR}년, 중요성기준: {MATERIALITY_THRESHOLD:,}원")
+    print(f"총 {len(result_df)}건 중 불일치 {len(diff_df)}건 (유의한 차이 {len(material_diff_df)}건 / 경미한 차이 {len(diff_df) - len(material_diff_df)}건)")
 
 
-def _format_workbook(writer, result_df, diff_df):
+def _format_workbook(writer, result_df, diff_df, material_diff_df):
     wb = writer.book
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -355,7 +364,7 @@ def _format_workbook(writer, result_df, diff_df):
     date_cols = ["취득일", "처분일", "내용연수재추정일"]
     money_cols = ["취득원가", "잔존가치", "회사반영_당기감가상각비", "재계산_당기감가상각비", "차이(재계산-회사반영)"]
 
-    for sheet_name, df in (("재계산결과", result_df), ("차이자산", diff_df)):
+    for sheet_name, df in (("재계산결과", result_df), ("차이자산", diff_df), ("유의한차이자산", material_diff_df)):
         ws = wb[sheet_name]
         n_rows, n_cols = df.shape
 
