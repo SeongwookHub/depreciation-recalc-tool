@@ -10,12 +10,24 @@
 - 회사반영금액과 비교하여 차이나는 자산만 별도 시트에 정리하고 recalc_result.xlsx 로 저장한다.
 """
 import datetime as dt
+import os
 import sys
 from decimal import Decimal, ROUND_HALF_UP
 
 import pandas as pd
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 # Windows 콘솔(PowerShell/cmd)이 시스템 코드페이지(cp949 등)로 표준출력을 열어
 # 한글 안내 메시지가 깨지는 것을 막기 위해 표준출력 인코딩을 UTF-8로 고정한다.
@@ -32,6 +44,9 @@ FY_YEAR = REF_DATE.year
 # 중요성 기준 금액(원): 회사반영 대비 재계산 차이의 절대값이 이 금액 미만이면
 # "경미한 차이", 이상이면 "유의한 차이"로 구분한다.
 MATERIALITY_THRESHOLD = 1_000_000
+
+# "유의한 차이" 자산의 AI 추정원인 코멘트 생성에 사용할 모델.
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # ---------------------------------------------------------------------------
 # 컬럼명 매핑
@@ -76,6 +91,42 @@ RATE_TABLE = {
 
 def classify_materiality(diff: int, threshold: int = MATERIALITY_THRESHOLD) -> str:
     return "유의한 차이" if abs(diff) >= threshold else "경미한 차이"
+
+
+def get_ai_estimated_cause(diff: int, elapsed_months: int, method: str,
+                            is_reestimated: bool, is_disposed: bool) -> str:
+    """
+    "유의한 차이" 자산에 대해 Claude API로 차이 발생 원인을 한 줄로 추정한다.
+    API 키가 없거나(.env 미설정) 호출 중 오류가 발생하면 이 기능만 건너뛰고
+    "-"를 반환한다(나머지 재계산 로직에는 영향을 주지 않는다).
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key or anthropic is None:
+        return "-"
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = (
+            "고정자산 감가상각비 재계산 검증에서 아래 자산의 회사반영 감가상각비와 "
+            "재계산 감가상각비 사이에 '유의한 차이'가 발생했습니다.\n"
+            f"- 차이금액(재계산-회사반영): {diff:,}원\n"
+            f"- 경과개월수(취득일~기준일): {elapsed_months}개월\n"
+            f"- 상각방법: {method}\n"
+            f"- 내용연수 재추정 여부: {'있음' if is_reestimated else '없음'}\n"
+            f"- 당기중 처분 여부: {'있음' if is_disposed else '없음'}\n\n"
+            "회계/세무 실무자 관점에서 이런 차이가 발생했을 가능성이 가장 높은 원인을 "
+            "한국어 한 줄(50자 이내)로 추정해서 답변하세요. 결론 한 줄 외 다른 설명은 출력하지 마세요."
+        )
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = next((b.text for b in response.content if b.type == "text"), "").strip()
+        return text if text else "-"
+    except Exception as e:
+        print(f"  [경고] AI 추정원인 호출 실패, 이 자산은 건너뜁니다: {e}")
+        return "-"
 
 
 def get_rate(life: int) -> float:
@@ -320,6 +371,11 @@ def main():
         match = "일치" if diff == 0 else "불일치"
         materiality = classify_materiality(diff)
 
+        ai_cause = "-"
+        if materiality == "유의한 차이":
+            ai_cause = get_ai_estimated_cause(
+                diff, elapsed, method, reest_date is not None, disposal is not None)
+
         rows.append({
             "자산명": r[cols["자산명"]],
             "자산분류": r[cols["자산분류"]],
@@ -340,6 +396,7 @@ def main():
             "차이(재계산-회사반영)": diff,
             "일치여부": match,
             "중요성구분": materiality,
+            "AI 추정원인": ai_cause,
         })
 
     result_df = pd.DataFrame(rows)
@@ -387,7 +444,10 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df):
             elif col_name in money_cols:
                 for row_idx in range(2, n_rows + 2):
                     ws.cell(row=row_idx, column=col_idx).number_format = "#,##0"
-            ws.column_dimensions[letter].width = max(14, len(col_name) + 4)
+            if col_name == "AI 추정원인":
+                ws.column_dimensions[letter].width = 60
+            else:
+                ws.column_dimensions[letter].width = max(14, len(col_name) + 4)
 
         if "일치여부" in col_names and n_rows > 0:
             match_col_idx = col_names.index("일치여부") + 1
