@@ -8,6 +8,9 @@
   2) 내용연수 재추정 자산: 재추정 시점의 장부가액을 새 내용연수로 재상각
   3) 내용연수 종료 자산: 더 이상 상각하지 않음
 - 회사반영금액과 비교하여 차이나는 자산만 별도 시트에 정리하고 recalc_result.xlsx 로 저장한다.
+- 취득원가/잔존가치/내용연수가 계산 불가능한 값(내용연수 0/음수, 잔존가치≥취득원가,
+  취득원가 0 이하)인 자산은 재계산에서 제외하고 "데이터오류" 시트에 사유와 함께 모아
+  보여준다(다른 정상 자산의 계산에는 영향을 주지 않는다).
 """
 import datetime as dt
 import os
@@ -91,6 +94,23 @@ RATE_TABLE = {
 
 def classify_materiality(diff: int, threshold: int = MATERIALITY_THRESHOLD) -> str:
     return "유의한 차이" if abs(diff) >= threshold else "경미한 차이"
+
+
+def validate_asset_inputs(cost: float, salvage: float, life: int) -> list:
+    """
+    재계산에 들어가기 전 취득원가/잔존가치/내용연수가 계산 가능한 값인지 검증한다.
+    문제가 있으면 오류 사유 문자열 리스트를, 문제가 없으면 빈 리스트를 반환한다.
+    여기서 걸러진 자산은 recalc_asset을 호출하지 않으므로(0/음수 내용연수로 인한
+    ZeroDivisionError 등), 다른 자산의 계산에 영향을 주지 않고 안전하게 제외된다.
+    """
+    errors = []
+    if life < 1:
+        errors.append(f"내용연수 오류(내용연수={life}년, 1년 이상의 정수여야 함)")
+    if cost <= 0:
+        errors.append(f"취득원가 오류(취득원가={cost:,.0f}원, 0보다 커야 함)")
+    if salvage >= cost:
+        errors.append(f"잔존가치 오류(잔존가치={salvage:,.0f}원, 취득원가={cost:,.0f}원 미만이어야 함)")
+    return errors
 
 
 def get_ai_estimated_cause(diff: int, elapsed_months: int, method: str,
@@ -348,7 +368,10 @@ def main():
 
     cols = resolve_columns(df)
 
+    error_cols = ["자산명", "자산분류", "취득일", "취득원가", "잔존가치", "내용연수(년)",
+                  "상각방법", "회사반영_당기감가상각비", "오류사유"]
     rows = []
+    error_rows = []
     for _, r in df.iterrows():
         acq = to_date_or_none(r[cols["취득일"]])
         cost = float(r[cols["취득원가"]])
@@ -361,6 +384,21 @@ def main():
         reest_date = to_date_or_none(r[cols["재추정일"]]) if cols["재추정일"] else None
         reest_life_raw = r[cols["재추정내용연수"]] if cols["재추정내용연수"] else None
         reest_life = int(reest_life_raw) if (reest_life_raw is not None and not pd.isna(reest_life_raw)) else None
+
+        validation_errors = validate_asset_inputs(cost, salvage, life)
+        if validation_errors:
+            error_rows.append({
+                "자산명": r[cols["자산명"]],
+                "자산분류": r[cols["자산분류"]],
+                "취득일": acq,
+                "취득원가": cost,
+                "잔존가치": salvage,
+                "내용연수(년)": life,
+                "상각방법": method,
+                "회사반영_당기감가상각비": reported,
+                "오류사유": "; ".join(validation_errors),
+            })
+            continue
 
         elapsed = elapsed_months_to_ref(acq, REF_DATE)
 
@@ -403,29 +441,41 @@ def main():
     diff_df = result_df[result_df["일치여부"] == "불일치"].copy()
     diff_df = diff_df.reindex(diff_df["차이(재계산-회사반영)"].abs().sort_values(ascending=False).index)
     material_diff_df = diff_df[diff_df["중요성구분"] == "유의한 차이"].copy()
+    error_df = pd.DataFrame(error_rows, columns=error_cols)
 
     with pd.ExcelWriter(OUT_PATH, engine="openpyxl") as writer:
         result_df.to_excel(writer, sheet_name="재계산결과", index=False)
         diff_df.to_excel(writer, sheet_name="차이자산", index=False)
         material_diff_df.to_excel(writer, sheet_name="유의한차이자산", index=False)
-        _format_workbook(writer, result_df, diff_df, material_diff_df)
+        error_df.to_excel(writer, sheet_name="데이터오류", index=False)
+        _format_workbook(writer, result_df, diff_df, material_diff_df, error_df)
 
     print("DONE:", OUT_PATH)
     print(f"기준일: {REF_DATE}, 당기: {FY_YEAR}년, 중요성기준: {MATERIALITY_THRESHOLD:,}원")
-    print(f"총 {len(result_df)}건 중 불일치 {len(diff_df)}건 (유의한 차이 {len(material_diff_df)}건 / 경미한 차이 {len(diff_df) - len(material_diff_df)}건)")
+    print(f"총 {len(result_df) + len(error_df)}건 중 정상 계산 {len(result_df)}건, "
+          f"데이터 오류로 계산 제외 {len(error_df)}건")
+    print(f"정상 계산 {len(result_df)}건 중 불일치 {len(diff_df)}건 "
+          f"(유의한 차이 {len(material_diff_df)}건 / 경미한 차이 {len(diff_df) - len(material_diff_df)}건)")
+    if len(error_df) > 0:
+        print(f"[!!] 데이터 오류로 제외된 자산 {len(error_df)}건 → '데이터오류' 시트에서 사유를 확인하세요.")
 
 
-def _format_workbook(writer, result_df, diff_df, material_diff_df):
+def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df):
     wb = writer.book
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_align = Alignment(horizontal="center", vertical="center")
     mismatch_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    error_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
 
     date_cols = ["취득일", "처분일", "내용연수재추정일"]
     money_cols = ["취득원가", "잔존가치", "회사반영_당기감가상각비", "재계산_당기감가상각비", "차이(재계산-회사반영)"]
 
-    for sheet_name, df in (("재계산결과", result_df), ("차이자산", diff_df), ("유의한차이자산", material_diff_df)):
+    sheets = (
+        ("재계산결과", result_df), ("차이자산", diff_df),
+        ("유의한차이자산", material_diff_df), ("데이터오류", error_df),
+    )
+    for sheet_name, df in sheets:
         ws = wb[sheet_name]
         n_rows, n_cols = df.shape
 
@@ -444,7 +494,7 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df):
             elif col_name in money_cols:
                 for row_idx in range(2, n_rows + 2):
                     ws.cell(row=row_idx, column=col_idx).number_format = "#,##0"
-            if col_name == "AI 추정원인":
+            if col_name in ("AI 추정원인", "오류사유"):
                 ws.column_dimensions[letter].width = 60
             else:
                 ws.column_dimensions[letter].width = max(14, len(col_name) + 4)
@@ -456,6 +506,11 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df):
                 if cell.value == "불일치":
                     for c_idx in range(1, n_cols + 1):
                         ws.cell(row=row_idx, column=c_idx).fill = mismatch_fill
+
+        if sheet_name == "데이터오류" and n_rows > 0:
+            for row_idx in range(2, n_rows + 2):
+                for c_idx in range(1, n_cols + 1):
+                    ws.cell(row=row_idx, column=c_idx).fill = error_fill
 
         ws.freeze_panes = "A2"
         if n_rows > 0:

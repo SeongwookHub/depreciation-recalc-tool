@@ -197,6 +197,39 @@ class TestMateriality:
 
 
 # ---------------------------------------------------------------------------
+# 8) 입력값 검증 (validate_asset_inputs) - 계산 불가능한 값은 "데이터 오류"로 분리
+# ---------------------------------------------------------------------------
+class TestValidateAssetInputs:
+    def test_life_zero_is_invalid(self):
+        errors = R.validate_asset_inputs(cost=5_000_000, salvage=0, life=0)
+        assert any("내용연수" in e for e in errors)
+
+    def test_life_negative_is_invalid(self):
+        errors = R.validate_asset_inputs(cost=8_000_000, salvage=0, life=-5)
+        assert any("내용연수" in e for e in errors)
+
+    def test_salvage_greater_than_cost_is_invalid(self):
+        errors = R.validate_asset_inputs(cost=10_000_000, salvage=15_000_000, life=5)
+        assert any("잔존가치" in e for e in errors)
+
+    def test_salvage_equal_to_cost_is_invalid(self):
+        # 잔존가치 == 취득원가면 상각대상금액이 0이 되어 이상하므로 오류로 취급(>= 판정)
+        errors = R.validate_asset_inputs(cost=10_000_000, salvage=10_000_000, life=5)
+        assert any("잔존가치" in e for e in errors)
+
+    def test_cost_zero_is_invalid(self):
+        errors = R.validate_asset_inputs(cost=0, salvage=0, life=5)
+        assert any("취득원가" in e for e in errors)
+
+    def test_cost_negative_is_invalid(self):
+        errors = R.validate_asset_inputs(cost=-1_000_000, salvage=0, life=5)
+        assert any("취득원가" in e for e in errors)
+
+    def test_valid_inputs_return_no_errors(self):
+        assert R.validate_asset_inputs(cost=10_000_000, salvage=1_000_000, life=5) == []
+
+
+# ---------------------------------------------------------------------------
 # 보조 함수: round_won (원 단위 반올림, ROUND_HALF_UP)
 # ---------------------------------------------------------------------------
 class TestRoundWon:
