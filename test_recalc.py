@@ -389,13 +389,32 @@ class TestRuleBasedCause:
         # None을 반환해 호출부가 AI 호출로 폴백하도록 한다.
         assert R.get_rule_based_cause(is_reestimated=False, is_disposed=False, note="-") is None
 
+    def test_capex_cause(self):
+        cause = R.get_rule_based_cause(
+            is_reestimated=False, is_disposed=False, note="자본적지출(2024-01-01→1,000,000원)",
+            is_capex=True)
+        assert cause is not None and "자본적지출" in cause
+
+    def test_suspension_cause(self):
+        cause = R.get_rule_based_cause(
+            is_reestimated=False, is_disposed=False, note="상각중단(2024-01-01~2024-06-30)",
+            is_suspended=True)
+        assert cause is not None and "상각중단" in cause
+
+    def test_capex_flag_without_note_returns_none(self):
+        # is_capex=True여도 note에 실제 자본적지출 기록이 없으면(다른 이유로 호출된 경우)
+        # 규칙을 적용하지 않는다.
+        assert R.get_rule_based_cause(
+            is_reestimated=False, is_disposed=False, note="-", is_capex=True) is None
+
 
 # ---------------------------------------------------------------------------
 # 12) 다기간(연도별) 비교 (fy_ref_date / build_multi_year_trend_df / detect_yoy_anomalies)
 # ---------------------------------------------------------------------------
 def _make_cols(df):
     required = ["자산명", "자산분류", "취득일", "취득원가", "잔존가치", "내용연수", "상각방법", "회사반영상각비"]
-    optional = ["처분일", "재추정일", "재추정내용연수", "총예정생산량", "당기실제생산량"]
+    optional = ["처분일", "재추정일", "재추정내용연수", "재추정후상각방법", "총예정생산량", "당기실제생산량",
+                "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일", "회사반영누계상각액"]
     cols = {k: k for k in required}
     cols.update({k: (k if k in df.columns else None) for k in optional})
     return cols
@@ -479,3 +498,225 @@ class TestMultiYearTrend:
         # 자산C: 2,000,000원 → 0원으로 급감 → "경고"(20% 임계치 초과)
         declined = cha_rows[(cha_rows["회계연도"] == 2025) & (cha_rows["재계산_당기감가상각비"] == 0)]
         assert declined["이상탐지"].iloc[0] == "경고"
+
+
+# ---------------------------------------------------------------------------
+# 13) 확장 이벤트(자본적지출/상각중단/방법변경) 입력값 검증
+# ---------------------------------------------------------------------------
+class TestValidateAssetInputsExtendedEvents:
+    def test_invalid_reest_method(self):
+        errors = R.validate_asset_inputs(cost=10_000_000, salvage=0, life=5, reest_method="정율법")
+        assert any("재추정후상각방법" in e for e in errors)
+
+    def test_capex_date_without_amount(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, capex_date=dt.date(2024, 1, 1), capex_amount=None)
+        assert any("자본적지출" in e for e in errors)
+
+    def test_capex_amount_without_date(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, capex_date=None, capex_amount=1_000_000)
+        assert any("자본적지출" in e for e in errors)
+
+    def test_capex_amount_zero_is_invalid(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, capex_date=dt.date(2024, 1, 1), capex_amount=0)
+        assert any("자본적지출액" in e for e in errors)
+
+    def test_suspension_missing_end(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, susp_start=dt.date(2024, 1, 1), susp_end=None)
+        assert any("상각중단기간" in e for e in errors)
+
+    def test_suspension_end_before_start(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5,
+            susp_start=dt.date(2024, 6, 1), susp_end=dt.date(2024, 1, 1))
+        assert any("상각중단기간" in e for e in errors)
+
+    def test_valid_extended_events_no_errors(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, reest_method="정률법",
+            capex_date=dt.date(2024, 1, 1), capex_amount=1_000,
+            susp_start=dt.date(2024, 1, 1), susp_end=dt.date(2024, 6, 1))
+        assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# 14) 상각중단 연장 로직 (nominal_month_index / apply_suspension_extension)
+# ---------------------------------------------------------------------------
+class TestSuspensionExtension:
+    def test_nominal_month_index_before_during_after(self):
+        susp_s, susp_e = R.month_index(2022, 6), R.month_index(2022, 12)  # 7개월
+        # 중단 이전: 그대로
+        assert R.nominal_month_index(R.month_index(2022, 3), susp_s, susp_e) == R.month_index(2022, 3)
+        # 중단 구간 안: 중단시작 직전월로 고정
+        assert R.nominal_month_index(R.month_index(2022, 9), susp_s, susp_e) == susp_s - 1
+        # 중단 이후: 중단 길이(7개월)만큼 당겨짐
+        assert R.nominal_month_index(R.month_index(2023, 1), susp_s, susp_e) == R.month_index(2023, 1) - 7
+
+    def test_extends_when_suspension_in_last_segment(self):
+        segments = [dict(start_idx=R.month_index(2020, 1), end_idx=R.month_index(2024, 12))]
+        susp_s, susp_e = R.month_index(2022, 6), R.month_index(2022, 12)
+        R.apply_suspension_extension(segments, susp_s, susp_e)
+        assert segments[0]["end_idx"] == R.month_index(2024, 12) + 7
+
+    def test_does_not_extend_when_suspension_in_earlier_segment(self):
+        # 회귀 테스트: 상각중단이 마지막이 아닌 이전 구간에서 발생하면 마지막 구간을
+        # 연장하면 안 된다(처음 구현 때 susp_start<=last_end만 검사해서 항상 연장되던 버그).
+        seg0 = dict(start_idx=R.month_index(2020, 1), end_idx=R.month_index(2021, 12))
+        seg1 = dict(start_idx=R.month_index(2022, 1), end_idx=R.month_index(2024, 12))
+        segments = [seg0, seg1]
+        susp_s, susp_e = R.month_index(2021, 6), R.month_index(2021, 12)  # seg0 안에서 발생
+        R.apply_suspension_extension(segments, susp_s, susp_e)
+        assert segments[1]["end_idx"] == R.month_index(2024, 12)  # 연장 없음
+
+
+# ---------------------------------------------------------------------------
+# 15) recalc_asset 통합 — 자본적지출/상각중단/방법변경 (손계산 검증)
+# ---------------------------------------------------------------------------
+class TestRecalcAssetExtendedEvents:
+    def test_capex_only(self):
+        # 취득 2020-01-01, 12,000,000원, 잔존가치0, 내용연수10년(월상각 100,000원)
+        # 2023-01-01 자본적지출 2,400,000원 → 그 시점 장부가액 8,400,000원 + 2,400,000
+        #   = 10,800,000원을 잔여내용연수(84개월)로 재상각 → 월 128,571.43원
+        # 당기(2025)는 이 구간에 완전히 포함되므로 12개월 * 128,571.43 = 1,542,857원
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=12_000_000, salvage=0, life=10, method="정액법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            capex_date=dt.date(2023, 1, 1), capex_amount=2_400_000,
+        )
+        assert dep == 1_542_857
+        assert months == 12
+        assert life_ended is False
+        assert "자본적지출" in note
+
+    def test_capex_and_reest_same_date_capex_applied_first(self):
+        # 취득 2022-01-01, 10,000,000원, 내용연수5년(월상각 166,666.67원)
+        # 2024-01-01에 자본적지출 2,000,000원과 재추정(4년)이 동시 발생.
+        # "자본적지출을 먼저 반영"하므로: 그 시점 장부가액 6,000,000 + 2,000,000
+        #   = 8,000,000원을 새 내용연수(4년=48개월)로 재상각 → 월 166,666.67원(=8,000,000/48)
+        # 당기(2025) 12개월 = 2,000,000원(딱 떨어짐: 8,000,000/48*12 = 2,000,000)
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2022, 1, 1), cost=10_000_000, salvage=0, life=5, method="정액법",
+            disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=4,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            capex_date=dt.date(2024, 1, 1), capex_amount=2_000_000,
+        )
+        assert dep == 2_000_000
+        assert months == 12
+
+    def test_capex_then_mid_year_method_change(self):
+        # 취득 2022-01-01 정액법 10년(120개월, 월상각 83,333.33원).
+        # 2024-01-01 자본적지출 1,000,000원(방법 유지) → 장부가액 8,000,000+1,000,000
+        #   = 9,000,000원을 잔여내용연수(96개월)로 재상각 → 월 93,750원.
+        # 2025-07-01 재추정(5년, 정률법으로 전환) → 그 시점 장부가액
+        #   9,000,000 - 93,750*18개월 = 7,312,500원을 새 기준가로 정률법(상각률 0.451) 상각 시작.
+        # 당기(2025)는 두 구간에 걸쳐 있다: 1~6월은 자본적지출 구간(정액법, 93,750*6=562,500원),
+        #   7~12월은 재추정 이후 구간(정률법, 7,312,500*0.451*6/12=1,648,968.75→1,648,969원).
+        # 합계 562,500 + 1,648,969 = 2,211,469원, 12개월(정액법 6개월 + 정률법 6개월).
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2022, 1, 1), cost=10_000_000, salvage=0, life=10, method="정액법",
+            disposal=None, reest_date=dt.date(2025, 7, 1), reest_life=5,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            capex_date=dt.date(2024, 1, 1), capex_amount=1_000_000, reest_method="정률법",
+        )
+        assert dep == 2_211_469
+        assert months == 12
+        assert "정률법" in note
+
+    def test_suspension_extends_life_end(self):
+        # 취득 2020-01-01, 6,000,000원, 내용연수5년(60개월, 월상각 100,000원, 원래 종료 2024-12).
+        # 2022-06~2022-12(7개월) 상각중단 → 종료시점이 2025-07로 연장된다.
+        # 당기(2025)는 1~7월만 상각대상(7개월) = 700,000원. 이미 8월부터는 상각 끝.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            susp_start=dt.date(2022, 6, 1), susp_end=dt.date(2022, 12, 31),
+        )
+        assert dep == 700_000
+        assert months == 7
+        assert life_ended is True  # 기준일(2025-12-31) 기준으로는 이미 연장된 종료월(2025-07)도 지남
+
+        # 중단 당해 연도(2022)는 12개월 중 7개월이 중단되어 5개월분만 인정된다.
+        dep2022, months2022, _, _ = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2022, 12, 31), fy_year=2022,
+            susp_start=dt.date(2022, 6, 1), susp_end=dt.date(2022, 12, 31),
+        )
+        assert dep2022 == 500_000
+        assert months2022 == 5
+
+    def test_suspension_in_non_last_segment_does_not_extend(self):
+        # 상각중단(2021-06~2021-12)이 재추정(2022-01, 3년) "이전" 구간에서 발생한다.
+        # v1 스코프 제한: 연장은 마지막 구간에서 발생한 상각중단에만 적용되므로, 이
+        # 자산의 최종 종료시점은 재추정 구간의 원래 종료월(2024-12)에서 바뀌지 않는다.
+        dep2025, months2025, life_ended, note = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=None, reest_date=dt.date(2022, 1, 1), reest_life=3,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            susp_start=dt.date(2021, 6, 1), susp_end=dt.date(2021, 12, 31),
+        )
+        assert dep2025 == 0  # 연장됐다면 0이 아니었을 것(회귀 방지)
+        assert life_ended is True
+
+        # 상각중단이 발생한 2021년 자체는 여전히 7개월분이 0원 처리된다(장부가액 계산에는 반영).
+        dep2021, months2021, _, _ = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=None, reest_date=dt.date(2022, 1, 1), reest_life=3,
+            ref_date=dt.date(2021, 12, 31), fy_year=2021,
+            susp_start=dt.date(2021, 6, 1), susp_end=dt.date(2021, 12, 31),
+        )
+        assert dep2021 == 500_000
+        assert months2021 == 5
+
+
+# ---------------------------------------------------------------------------
+# 16) 전기말 감가상각누계액 재계산 (recalc_accumulated_dep)
+# ---------------------------------------------------------------------------
+class TestAccumulatedDepreciation:
+    def test_plain_asset_sums_full_years(self):
+        # 취득 2020-01-01, 6,000,000원, 내용연수5년(월상각 100,000원).
+        # fy_year=2023이면 전기(2020~2022) 3개년 * 1,200,000원 = 3,600,000원.
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2023)
+        assert accum == 3_600_000
+
+    def test_units_of_production_returns_none(self):
+        # 생산량비례법은 과거 연도별 생산량 이력을 추적하지 않으므로(v1 한계) None.
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=1, method="생산량비례법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2023,
+            total_units=1_000, period_units=100)
+        assert accum is None
+
+    def test_acquired_in_current_fy_year_has_no_prior_accumulation(self):
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2025, 6, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025)
+        assert accum == 0
+
+    def test_disposal_stops_accumulation(self):
+        # 취득 2020-01-01, 내용연수5년(월상각 100,000원), 2022-06-30 처분.
+        # 2020,2021은 각 1,200,000원, 2022는 처분월까지 6개월=600,000원,
+        # 2023,2024는 이미 처분되어 0원 -> 합계 3,000,000원.
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=dt.date(2022, 6, 30), reest_date=None, reest_life=None, fy_year=2025)
+        assert accum == 3_000_000
+
+    def test_accumulation_reflects_capex(self):
+        # 취득 2020-01-01, 12,000,000원, 내용연수10년(월상각 100,000원),
+        # 2023-01-01 자본적지출 2,400,000원(잔여내용연수 84개월로 재상각, 월 128,571.43원).
+        # 2020~2022(3년): 1,200,000원씩 = 3,600,000원.
+        # 2023~2024(2년): 자본적지출 반영 후 연 1,542,857원씩(반올림) = 3,085,714원.
+        # 합계 6,685,714원.
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2020, 1, 1), cost=12_000_000, salvage=0, life=10, method="정액법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025,
+            capex_date=dt.date(2023, 1, 1), capex_amount=2_400_000)
+        assert accum == 6_685_714
