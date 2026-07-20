@@ -51,6 +51,14 @@ MATERIALITY_THRESHOLD = 1_000_000
 # "유의한 차이" 자산의 AI 추정원인 코멘트 생성에 사용할 모델.
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
+# 다기간(연도별) 비교 대상 회계연도 목록. 기본값처럼 [FY_YEAR] 하나만 두면
+# 기존과 완전히 동일하게 단일 연도만 계산한다. 여러 연도 추이를 보려면
+# 예: COMPARISON_YEARS = [2023, 2024, 2025]
+COMPARISON_YEARS = [FY_YEAR]
+
+# 다기간 비교에서 전년대비 이 비율(%) 이상 증감하면 "경고"로 표시한다.
+YOY_ANOMALY_THRESHOLD_PCT = 20.0
+
 # ---------------------------------------------------------------------------
 # 컬럼명 매핑
 # 회사마다 고정자산대장의 컬럼명이 다를 수 있으므로, 실제 파일의 컬럼명을
@@ -74,13 +82,15 @@ COLUMN_MAP = {
     "처분일": "처분일",
     "재추정일": "내용연수재추정일",
     "재추정내용연수": "재추정후내용연수(년)",
+    "총예정생산량": "총예정생산량",
+    "당기실제생산량": "당기실제생산량",
 }
 
 REQUIRED_KEYS = [
     "자산명", "자산분류", "취득일", "취득원가", "잔존가치",
     "내용연수", "상각방법", "회사반영상각비",
 ]
-OPTIONAL_KEYS = ["처분일", "재추정일", "재추정내용연수"]
+OPTIONAL_KEYS = ["처분일", "재추정일", "재추정내용연수", "총예정생산량", "당기실제생산량"]
 
 # 국세청 고시 내용연수별 상각률표(정률법). 표에 없는 내용연수는
 # 잔존가치 5% 가정(r = 1-0.05**(1/n))으로 근사한다.
@@ -96,20 +106,26 @@ def classify_materiality(diff: int, threshold: int = MATERIALITY_THRESHOLD) -> s
     return "유의한 차이" if abs(diff) >= threshold else "경미한 차이"
 
 
-def validate_asset_inputs(cost: float, salvage: float, life: int) -> list:
+def validate_asset_inputs(cost: float, salvage: float, life: int,
+                           method: str = None, total_units: float = None) -> list:
     """
     재계산에 들어가기 전 취득원가/잔존가치/내용연수가 계산 가능한 값인지 검증한다.
     문제가 있으면 오류 사유 문자열 리스트를, 문제가 없으면 빈 리스트를 반환한다.
     여기서 걸러진 자산은 recalc_asset을 호출하지 않으므로(0/음수 내용연수로 인한
     ZeroDivisionError 등), 다른 자산의 계산에 영향을 주지 않고 안전하게 제외된다.
+
+    생산량비례법(method="생산량비례법")은 내용연수를 계산에 쓰지 않고 대신
+    총예정생산량을 쓰므로, 이 경우엔 내용연수 검증 대신 총예정생산량을 검증한다.
     """
     errors = []
-    if life < 1:
+    if method != "생산량비례법" and life < 1:
         errors.append(f"내용연수 오류(내용연수={life}년, 1년 이상의 정수여야 함)")
     if cost <= 0:
         errors.append(f"취득원가 오류(취득원가={cost:,.0f}원, 0보다 커야 함)")
     if salvage >= cost:
         errors.append(f"잔존가치 오류(잔존가치={salvage:,.0f}원, 취득원가={cost:,.0f}원 미만이어야 함)")
+    if method == "생산량비례법" and (total_units is None or total_units <= 0):
+        errors.append(f"총예정생산량 오류(총예정생산량={total_units}, 0보다 커야 함)")
     return errors
 
 
@@ -149,6 +165,24 @@ def get_ai_estimated_cause(diff: int, elapsed_months: int, method: str,
         return "-"
 
 
+def get_rule_based_cause(is_reestimated: bool, is_disposed: bool, note: str) -> str:
+    """
+    이미 계산되어 있는 처분/재추정/내용연수종료 정보만으로 원인이 명확히 설명되는
+    케이스를 규칙으로 1차 분류한다. 분류 가능하면 원인 문자열을, 애매하면 None을
+    반환해서 호출부가 AI 호출(get_ai_estimated_cause)로 폴백하도록 한다
+    (유의한 차이 자산마다 매번 API를 호출하지 않아도 되게 해서 비용/속도를 아낀다).
+    """
+    if is_disposed and "당기중처분" in note:
+        return "처분일 반영 오류 추정(처분일까지의 월할상각 미반영 가능성)"
+    if is_disposed and "전기이전처분" in note:
+        return "전기 이전 처분자산에 당기 상각비를 계속 반영했을 가능성"
+    if is_reestimated:
+        return "내용연수 재추정 반영 오류 추정(재추정시점 장부가액/신규 내용연수 미반영 가능성)"
+    if "내용연수종료" in note:
+        return "내용연수 종료 자산에 상각비를 계속 반영했을 가능성"
+    return None
+
+
 def get_rate(life: int) -> float:
     if life in RATE_TABLE:
         return RATE_TABLE[life]
@@ -172,6 +206,15 @@ def to_date_or_none(v):
 def elapsed_months_to_ref(acq: dt.date, ref: dt.date) -> int:
     """취득일부터 기준일까지 경과 개월수(취득월 포함, 월 단위 카운트)."""
     return month_index(ref.year, ref.month) - month_index(acq.year, acq.month) + 1
+
+
+def fy_ref_date(year: int) -> dt.date:
+    """
+    다기간 비교에서 각 회계연도의 기준일을 반환한다. REF_DATE의 연도와 같으면
+    REF_DATE를 그대로 쓰고(12/31이 아닌 기준일 설정도 존중), 그 외 연도는
+    해당 연도의 12/31을 기준일로 본다.
+    """
+    return REF_DATE if year == FY_YEAR else dt.date(year, 12, 31)
 
 
 # ---------------------------------------------------------------------------
@@ -294,9 +337,30 @@ def declining_balance_current_period_dep(acq, cost, salvage, life_years,
 
 
 # ---------------------------------------------------------------------------
+# 생산량비례법 재계산
+# ---------------------------------------------------------------------------
+def units_of_production_current_period_dep(cost, salvage, total_units, period_units,
+                                             disposal, fy_year) -> tuple:
+    """
+    생산량비례법 당기상각비 = (취득원가-잔존가치) x (당기실제생산량/총예정생산량).
+    - 처분일이 당기 이전 회계연도면 이미 상각이 종료된 것으로 보고 0원을 반환한다.
+    - 취득 이후 누적생산량 이력은 추적하지 않으므로(당기 값만 입력받는 v1 단순화),
+      상각누계액이 상각대상금액(취득원가-잔존가치)을 넘지 않도록만 방어적으로 캡을 건다.
+    """
+    if disposal is not None and disposal.year < fy_year:
+        return 0.0, 0
+    dep = (cost - salvage) * (period_units / total_units)
+    dep = max(0.0, min(dep, cost - salvage))
+    months = 12 if period_units and period_units > 0 else 0
+    return dep, months
+
+
+# ---------------------------------------------------------------------------
 # 자산 1건 재계산
 # ---------------------------------------------------------------------------
-def recalc_asset(acq, cost, salvage, life, method, disposal, reest_date, reest_life, ref_date, fy_year):
+def recalc_asset(acq, cost, salvage, life, method, disposal, reest_date, reest_life, ref_date, fy_year,
+                  total_units=None, period_units=None):
+    active_end_idx = None
     if method == "정액법":
         segments = build_straight_line_segments(acq, cost, salvage, life, reest_date, reest_life)
         disposal_idx = month_index(disposal.year, disposal.month) if disposal is not None else None
@@ -309,11 +373,19 @@ def recalc_asset(acq, cost, salvage, life, method, disposal, reest_date, reest_l
             active_end_idx = month_index(reest_date.year, 1) + reest_life * 12 - 1
         else:
             active_end_idx = month_index(acq.year, acq.month) + life * 12 - 1
+    elif method == "생산량비례법":
+        dep_raw, months = units_of_production_current_period_dep(
+            cost, salvage, total_units, period_units, disposal, fy_year)
     else:
         raise ValueError(f"알 수 없는 상각방법: {method}")
 
-    ref_idx = month_index(ref_date.year, ref_date.month)
-    life_ended = ref_idx > active_end_idx
+    if active_end_idx is not None:
+        ref_idx = month_index(ref_date.year, ref_date.month)
+        life_ended = ref_idx > active_end_idx
+    else:
+        # 생산량비례법은 누적생산량 이력을 추적하지 않아(v1 단순화) 시간 기준
+        # 생애종료 판정을 할 수 없으므로 항상 "종료 아님"으로 본다.
+        life_ended = False
 
     notes = []
     if disposal is not None:
@@ -362,6 +434,106 @@ def resolve_columns(df):
     return resolved
 
 
+def build_category_summary(result_df: pd.DataFrame, error_df: pd.DataFrame) -> pd.DataFrame:
+    """자산분류별 전체/정상/불일치/유의한차이/오류 건수와 불일치율을 집계한다."""
+    if len(result_df) > 0:
+        normal = result_df.groupby("자산분류").agg(
+            정상계산건수=("자산명", "count"),
+            불일치건수=("일치여부", lambda s: (s == "불일치").sum()),
+            유의한차이건수=("중요성구분", lambda s: (s == "유의한 차이").sum()),
+        )
+    else:
+        normal = pd.DataFrame(columns=["정상계산건수", "불일치건수", "유의한차이건수"])
+        normal.index.name = "자산분류"
+
+    if len(error_df) > 0:
+        error_counts = error_df.groupby("자산분류").agg(오류건수=("자산명", "count"))
+    else:
+        error_counts = pd.DataFrame(columns=["오류건수"])
+        error_counts.index.name = "자산분류"
+
+    summary = normal.join(error_counts, how="outer").fillna(0)
+    for col in ("정상계산건수", "불일치건수", "유의한차이건수", "오류건수"):
+        summary[col] = summary[col].astype(int)
+    summary["전체건수"] = summary["정상계산건수"] + summary["오류건수"]
+    summary["불일치율(%)"] = summary.apply(
+        lambda row: round(row["불일치건수"] / row["정상계산건수"] * 100, 1) if row["정상계산건수"] > 0 else 0.0,
+        axis=1,
+    )
+    summary = summary.reset_index().rename(columns={"자산분류": "자산분류"})
+    return summary[["자산분류", "전체건수", "정상계산건수", "불일치건수", "불일치율(%)", "유의한차이건수", "오류건수"]]
+
+
+def parse_asset_row(r, cols) -> dict:
+    """엑셀 한 행에서 계산에 필요한 원시값을 파싱해 dict로 반환한다."""
+    total_units_raw = r[cols["총예정생산량"]] if cols["총예정생산량"] else None
+    period_units_raw = r[cols["당기실제생산량"]] if cols["당기실제생산량"] else None
+    reest_life_raw = r[cols["재추정내용연수"]] if cols["재추정내용연수"] else None
+    return dict(
+        자산명=r[cols["자산명"]],
+        자산분류=r[cols["자산분류"]],
+        acq=to_date_or_none(r[cols["취득일"]]),
+        cost=float(r[cols["취득원가"]]),
+        salvage=float(r[cols["잔존가치"]]),
+        life=int(r[cols["내용연수"]]),
+        method=str(r[cols["상각방법"]]).strip(),
+        reported=round_won(r[cols["회사반영상각비"]]),
+        disposal=to_date_or_none(r[cols["처분일"]]) if cols["처분일"] else None,
+        reest_date=to_date_or_none(r[cols["재추정일"]]) if cols["재추정일"] else None,
+        reest_life=int(reest_life_raw) if (reest_life_raw is not None and not pd.isna(reest_life_raw)) else None,
+        total_units=float(total_units_raw) if (total_units_raw is not None and not pd.isna(total_units_raw)) else None,
+        period_units=float(period_units_raw) if (period_units_raw is not None and not pd.isna(period_units_raw)) else None,
+    )
+
+
+def build_multi_year_trend_df(df: pd.DataFrame, cols: dict, years: list) -> pd.DataFrame:
+    """
+    자산별로 years에 지정된 각 회계연도의 재계산 상각비를 구해 long format으로 쌓는다.
+    자산명이 중복될 수 있으므로 그룹핑용 키는 자산명이 아니라 원본 행 순번(자산ID)을 쓴다.
+    데이터 오류(계산 불가능한 값)로 걸러지는 자산은 단일연도 처리와 동일하게 제외한다.
+    """
+    rows = []
+    for asset_id, (_, r) in enumerate(df.iterrows()):
+        p = parse_asset_row(r, cols)
+        errors = validate_asset_inputs(p["cost"], p["salvage"], p["life"], method=p["method"], total_units=p["total_units"])
+        if errors:
+            continue
+        for y in years:
+            recalced, months, life_ended, note = recalc_asset(
+                p["acq"], p["cost"], p["salvage"], p["life"], p["method"], p["disposal"],
+                p["reest_date"], p["reest_life"], fy_ref_date(y), y,
+                total_units=p["total_units"], period_units=p["period_units"])
+            rows.append({
+                "자산ID": asset_id, "자산명": p["자산명"], "자산분류": p["자산분류"],
+                "상각방법": p["method"], "회계연도": y,
+                "재계산_당기감가상각비": recalced, "당기해당월수": months, "비고": note,
+            })
+    return pd.DataFrame(rows)
+
+
+def detect_yoy_anomalies(trend_df: pd.DataFrame, threshold_pct: float = YOY_ANOMALY_THRESHOLD_PCT) -> pd.DataFrame:
+    """
+    자산ID별로 회계연도 순 정렬 후 전년대비 증감률을 계산해 이상탐지 컬럼을 추가한다.
+    전년도 상각비가 0원이면 %증감이 무의미하므로(0으로 나누기) '신규발생'/'-'로 표기한다.
+    """
+    df = trend_df.sort_values(["자산ID", "회계연도"]).reset_index(drop=True).copy()
+    prev = df.groupby("자산ID")["재계산_당기감가상각비"].shift(1)
+    pct = (df["재계산_당기감가상각비"] - prev) / prev.replace(0, float("nan")) * 100
+    df["전년대비증감률(%)"] = pct.round(1)
+
+    def _flag(row_prev, row_cur, row_pct):
+        if pd.isna(row_prev):
+            return "-"
+        if row_prev == 0:
+            return "신규발생" if row_cur > 0 else "-"
+        return "경고" if abs(row_pct) >= threshold_pct else "-"
+
+    df["이상탐지"] = [
+        _flag(p, c, pc) for p, c, pc in zip(prev, df["재계산_당기감가상각비"], pct)
+    ]
+    return df
+
+
 def main():
     df = pd.read_excel(IN_PATH, sheet_name=0)
     df.columns = [str(c).strip() for c in df.columns]
@@ -369,33 +541,29 @@ def main():
     cols = resolve_columns(df)
 
     error_cols = ["자산명", "자산분류", "취득일", "취득원가", "잔존가치", "내용연수(년)",
-                  "상각방법", "회사반영_당기감가상각비", "오류사유"]
+                  "상각방법", "회사반영_당기감가상각비", "총예정생산량", "당기실제생산량", "오류사유"]
     rows = []
     error_rows = []
     for _, r in df.iterrows():
-        acq = to_date_or_none(r[cols["취득일"]])
-        cost = float(r[cols["취득원가"]])
-        salvage = float(r[cols["잔존가치"]])
-        life = int(r[cols["내용연수"]])
-        method = str(r[cols["상각방법"]]).strip()
-        reported = round_won(r[cols["회사반영상각비"]])
+        p = parse_asset_row(r, cols)
+        acq, cost, salvage, life, method, reported = (
+            p["acq"], p["cost"], p["salvage"], p["life"], p["method"], p["reported"])
+        disposal, reest_date, reest_life = p["disposal"], p["reest_date"], p["reest_life"]
+        total_units, period_units = p["total_units"], p["period_units"]
 
-        disposal = to_date_or_none(r[cols["처분일"]]) if cols["처분일"] else None
-        reest_date = to_date_or_none(r[cols["재추정일"]]) if cols["재추정일"] else None
-        reest_life_raw = r[cols["재추정내용연수"]] if cols["재추정내용연수"] else None
-        reest_life = int(reest_life_raw) if (reest_life_raw is not None and not pd.isna(reest_life_raw)) else None
-
-        validation_errors = validate_asset_inputs(cost, salvage, life)
+        validation_errors = validate_asset_inputs(cost, salvage, life, method=method, total_units=total_units)
         if validation_errors:
             error_rows.append({
-                "자산명": r[cols["자산명"]],
-                "자산분류": r[cols["자산분류"]],
+                "자산명": p["자산명"],
+                "자산분류": p["자산분류"],
                 "취득일": acq,
                 "취득원가": cost,
                 "잔존가치": salvage,
                 "내용연수(년)": life,
                 "상각방법": method,
                 "회사반영_당기감가상각비": reported,
+                "총예정생산량": total_units,
+                "당기실제생산량": period_units,
                 "오류사유": "; ".join(validation_errors),
             })
             continue
@@ -403,20 +571,27 @@ def main():
         elapsed = elapsed_months_to_ref(acq, REF_DATE)
 
         recalced, cur_months, life_ended, note = recalc_asset(
-            acq, cost, salvage, life, method, disposal, reest_date, reest_life, REF_DATE, FY_YEAR)
+            acq, cost, salvage, life, method, disposal, reest_date, reest_life, REF_DATE, FY_YEAR,
+            total_units=total_units, period_units=period_units)
 
         diff = recalced - reported
         match = "일치" if diff == 0 else "불일치"
         materiality = classify_materiality(diff)
 
-        ai_cause = "-"
+        cause = "-"
+        cause_source = "-"
         if materiality == "유의한 차이":
-            ai_cause = get_ai_estimated_cause(
-                diff, elapsed, method, reest_date is not None, disposal is not None)
+            rule_cause = get_rule_based_cause(reest_date is not None, disposal is not None, note)
+            if rule_cause is not None:
+                cause, cause_source = rule_cause, "규칙"
+            else:
+                cause = get_ai_estimated_cause(
+                    diff, elapsed, method, reest_date is not None, disposal is not None)
+                cause_source = "AI" if cause != "-" else "-"
 
         rows.append({
-            "자산명": r[cols["자산명"]],
-            "자산분류": r[cols["자산분류"]],
+            "자산명": p["자산명"],
+            "자산분류": p["자산분류"],
             "취득일": acq,
             "취득원가": cost,
             "잔존가치": salvage,
@@ -425,6 +600,8 @@ def main():
             "처분일": disposal,
             "내용연수재추정일": reest_date,
             "재추정후내용연수(년)": reest_life,
+            "총예정생산량": total_units,
+            "당기실제생산량": period_units,
             "경과개월수(취득일~기준일)": elapsed,
             "당기해당월수": cur_months,
             "내용연수종료여부": "종료" if life_ended else "-",
@@ -434,21 +611,44 @@ def main():
             "차이(재계산-회사반영)": diff,
             "일치여부": match,
             "중요성구분": materiality,
-            "AI 추정원인": ai_cause,
+            "추정원인": cause,
+            "추정원인출처": cause_source,
         })
 
     result_df = pd.DataFrame(rows)
     diff_df = result_df[result_df["일치여부"] == "불일치"].copy()
     diff_df = diff_df.reindex(diff_df["차이(재계산-회사반영)"].abs().sort_values(ascending=False).index)
+    # 감사자가 직접 채워 넣는 검토란. diff_df에서 파생되는 material_diff_df에도
+    # 그대로 이어지므로("차이자산"/"유의한차이자산" 두 시트 모두 대상) 여기 한 곳에만 추가한다.
+    diff_df["검토자"] = ""
+    diff_df["검토의견"] = ""
+    diff_df["검토일"] = pd.NaT
     material_diff_df = diff_df[diff_df["중요성구분"] == "유의한 차이"].copy()
     error_df = pd.DataFrame(error_rows, columns=error_cols)
+    category_summary_df = build_category_summary(result_df, error_df)
+
+    # 다기간(연도별) 비교: COMPARISON_YEARS가 [FY_YEAR] 하나뿐이면(기본값) 이 블록은
+    # 건너뛰고, 기존 4개+통계 시트 출력이 이전과 완전히 동일하게 유지된다.
+    trend_df = None
+    pivot_df = None
+    if len(COMPARISON_YEARS) > 1:
+        trend_df = detect_yoy_anomalies(build_multi_year_trend_df(df, cols, COMPARISON_YEARS))
+        pivot_df = trend_df.pivot_table(
+            index=["자산ID", "자산명", "자산분류", "상각방법"],
+            columns="회계연도", values="재계산_당기감가상각비",
+        ).reset_index()
 
     with pd.ExcelWriter(OUT_PATH, engine="openpyxl") as writer:
         result_df.to_excel(writer, sheet_name="재계산결과", index=False)
         diff_df.to_excel(writer, sheet_name="차이자산", index=False)
         material_diff_df.to_excel(writer, sheet_name="유의한차이자산", index=False)
         error_df.to_excel(writer, sheet_name="데이터오류", index=False)
-        _format_workbook(writer, result_df, diff_df, material_diff_df, error_df)
+        category_summary_df.to_excel(writer, sheet_name="자산군별통계", index=False)
+        if trend_df is not None:
+            trend_df.to_excel(writer, sheet_name="연도별추이", index=False)
+            pivot_df.to_excel(writer, sheet_name="연도별요약", index=False)
+        _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, category_summary_df,
+                          trend_df, pivot_df)
 
     print("DONE:", OUT_PATH)
     print(f"기준일: {REF_DATE}, 당기: {FY_YEAR}년, 중요성기준: {MATERIALITY_THRESHOLD:,}원")
@@ -458,23 +658,35 @@ def main():
           f"(유의한 차이 {len(material_diff_df)}건 / 경미한 차이 {len(diff_df) - len(material_diff_df)}건)")
     if len(error_df) > 0:
         print(f"[!!] 데이터 오류로 제외된 자산 {len(error_df)}건 → '데이터오류' 시트에서 사유를 확인하세요.")
+    print("=== 자산군별 통계 ===")
+    print(category_summary_df.to_string(index=False))
+    if trend_df is not None:
+        warn_count = len(trend_df[trend_df["이상탐지"] == "경고"])
+        print(f"=== 다기간 비교({COMPARISON_YEARS}) === "
+              f"전년대비 {YOY_ANOMALY_THRESHOLD_PCT}% 이상 증감 경고 {warn_count}건")
 
 
-def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df):
+def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, category_summary_df,
+                      trend_df=None, pivot_df=None):
     wb = writer.book
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_align = Alignment(horizontal="center", vertical="center")
     mismatch_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     error_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    review_input_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
 
-    date_cols = ["취득일", "처분일", "내용연수재추정일"]
+    date_cols = ["취득일", "처분일", "내용연수재추정일", "검토일"]
     money_cols = ["취득원가", "잔존가치", "회사반영_당기감가상각비", "재계산_당기감가상각비", "차이(재계산-회사반영)"]
 
-    sheets = (
+    sheets = [
         ("재계산결과", result_df), ("차이자산", diff_df),
         ("유의한차이자산", material_diff_df), ("데이터오류", error_df),
-    )
+        ("자산군별통계", category_summary_df),
+    ]
+    if trend_df is not None:
+        sheets += [("연도별추이", trend_df), ("연도별요약", pivot_df)]
+
     for sheet_name, df in sheets:
         ws = wb[sheet_name]
         n_rows, n_cols = df.shape
@@ -488,16 +700,19 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df):
         col_names = list(df.columns)
         for col_idx, col_name in enumerate(col_names, start=1):
             letter = get_column_letter(col_idx)
+            # "연도별요약"은 회계연도(정수)가 컬럼 헤더가 되는 pivot 결과라 money_cols
+            # 이름 목록으로는 못 잡으므로, 이 시트에서는 정수 헤더를 금액으로 취급한다.
+            is_pivot_year_col = sheet_name == "연도별요약" and isinstance(col_name, int)
             if col_name in date_cols:
                 for row_idx in range(2, n_rows + 2):
                     ws.cell(row=row_idx, column=col_idx).number_format = "yyyy-mm-dd"
-            elif col_name in money_cols:
+            elif col_name in money_cols or is_pivot_year_col:
                 for row_idx in range(2, n_rows + 2):
                     ws.cell(row=row_idx, column=col_idx).number_format = "#,##0"
-            if col_name in ("AI 추정원인", "오류사유"):
+            if col_name in ("추정원인", "오류사유", "검토의견"):
                 ws.column_dimensions[letter].width = 60
             else:
-                ws.column_dimensions[letter].width = max(14, len(col_name) + 4)
+                ws.column_dimensions[letter].width = max(14, len(str(col_name)) + 4)
 
         if "일치여부" in col_names and n_rows > 0:
             match_col_idx = col_names.index("일치여부") + 1
@@ -511,6 +726,15 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df):
             for row_idx in range(2, n_rows + 2):
                 for c_idx in range(1, n_cols + 1):
                     ws.cell(row=row_idx, column=c_idx).fill = error_fill
+
+        # 검토란(검토자/검토의견/검토일)은 감사자가 직접 입력하는 영역이므로,
+        # 위의 "불일치 행 전체 빨간색" 칠보다 뒤에 별도 색으로 덧칠해 구분한다.
+        if sheet_name in ("차이자산", "유의한차이자산") and n_rows > 0:
+            for col_name in ("검토자", "검토의견", "검토일"):
+                if col_name in col_names:
+                    col_idx = col_names.index(col_name) + 1
+                    for row_idx in range(2, n_rows + 2):
+                        ws.cell(row=row_idx, column=col_idx).fill = review_input_fill
 
         ws.freeze_panes = "A2"
         if n_rows > 0:
