@@ -1,6 +1,6 @@
-# 고정자산 감가상각비 재계산 검증 도구 (depreciation-recalc-tool)
+# 고정자산 감가상각비 재계산 검증 도구 (depreciation-audit-tool)
 
-[![Tests](https://github.com/SeongwookHub/depreciation-recalc-tool/actions/workflows/tests.yml/badge.svg)](https://github.com/SeongwookHub/depreciation-recalc-tool/actions/workflows/tests.yml)
+[![Tests](https://github.com/SeongwookHub/depreciation-audit-tool/actions/workflows/tests.yml/badge.svg)](https://github.com/SeongwookHub/depreciation-audit-tool/actions/workflows/tests.yml)
 
 회사가 장부에 반영한 고정자산 감가상각비가 정액법·정률법·생산량비례법 계산 원리에 맞게 정확히 계산됐는지, 엑셀 고정자산대장 하나로 자동 재계산하고 차이 나는 자산만 짚어주는 파이썬 도구입니다.
 
