@@ -16,7 +16,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: python -m pip install pandas openpyxl pytest
+        run: python -m pip install -r requirements.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
 
       - name: Run tests
         run: pytest test_recalc.py -v

@@ -1,0 +1,6 @@
+pandas
+openpyxl
+anthropic
+python-dotenv
+pytest
+ruff

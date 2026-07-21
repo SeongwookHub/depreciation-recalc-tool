@@ -51,7 +51,7 @@
 터미널(PowerShell)에서 아래 명령어를 실행해 필요한 라이브러리를 설치합니다.
 
 ```powershell
-python -m pip install pandas openpyxl anthropic python-dotenv
+python -m pip install -r requirements.txt
 ```
 
 AI 추정원인 기능을 쓰려면 프로젝트 폴더의 `.env` 파일에 다음과 같이 API 키를 넣습니다(없어도 나머지 기능은 정상 동작합니다).
@@ -68,7 +68,13 @@ ANTHROPIC_API_KEY=여기에_실제_키_입력
 python recalc.py
 ```
 
-실행하면 먼저 어떤 컬럼을 어떻게 인식했는지 안내 메시지가 출력되고, 이어서 `recalc_result.xlsx` 파일이 같은 폴더에 생성됩니다.
+인자 없이 실행하면 저장소 안의 `sample_asset_ledger.xlsx`를 읽어 같은 폴더에 `recalc_result.xlsx`를 생성합니다. 다른 파일을 검증하려면 `--input`/`--output` 옵션으로 경로를 지정합니다.
+
+```powershell
+python recalc.py --input 검증하려는_고정자산대장.xlsx --output 결과파일.xlsx
+```
+
+실행하면 먼저 어떤 컬럼을 어떻게 인식했는지 안내 메시지가 출력되고, 이어서 결과 엑셀 파일이 생성됩니다.
 
 ### 테스트 실행
 
@@ -91,9 +97,8 @@ pytest test_recalc.py -v
 
 그래도 컬럼을 못 찾거나 잘못 매칭됐다면, 아래처럼 `COLUMN_MAP`에서 해당 항목만 실제 파일의 컬럼명으로 직접 지정하면 됩니다(이 경우 1단계 정확 일치로 항상 우선 적용됩니다).
 
-1. `recalc.py` 상단의 `IN_PATH`를 검증하려는 고정자산대장 엑셀 파일 경로로 바꿉니다.
+1. `python recalc.py --input 검증하려는_고정자산대장.xlsx --output 결과파일.xlsx`로 바로 실행합니다(인자를 생략하면 저장소의 `sample_asset_ledger.xlsx`/`recalc_result.xlsx`를 기본값으로 사용합니다).
 2. 필요하다면 `COLUMN_MAP` 딕셔너리에서 왼쪽(자산명, 취득원가 등 항목 이름)은 그대로 두고, 오른쪽 값만 실제 파일의 컬럼명으로 바꿉니다.
-3. `python recalc.py`를 실행합니다.
 
 ```python
 COLUMN_MAP = {

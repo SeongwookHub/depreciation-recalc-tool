@@ -12,6 +12,7 @@
   취득원가 0 이하)인 자산은 재계산에서 제외하고 "데이터오류" 시트에 사유와 함께 모아
   보여준다(다른 정상 자산의 계산에는 영향을 주지 않는다).
 """
+import argparse
 import datetime as dt
 import difflib
 import os
@@ -38,8 +39,11 @@ except ImportError:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-IN_PATH = r"C:\Users\wh981\재무검증도구\depreciation-recalc-tool\sample_asset_ledger.xlsx"
-OUT_PATH = r"C:\Users\wh981\재무검증도구\depreciation-recalc-tool\recalc_result.xlsx"
+# 기본값은 이 스크립트가 있는 폴더의 샘플 파일. 다른 회사 파일을 검증하려면
+# `python recalc.py --input 파일.xlsx --output 결과.xlsx`처럼 인자로 넘기면 된다
+# (아래 __main__ 블록 참고). 코드를 직접 고치지 않아도 되도록 하기 위함.
+IN_PATH = "sample_asset_ledger.xlsx"
+OUT_PATH = "recalc_result.xlsx"
 
 # 기준일: 이 날짜가 속한 회계연도(1/1~12/31)의 당기 감가상각비를 재계산한다.
 REF_DATE = dt.date(2025, 12, 31)
@@ -1968,4 +1972,12 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, cat
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="고정자산 감가상각비 재계산 검증 도구")
+    parser.add_argument("--input", "-i", default=IN_PATH,
+                         help="입력 고정자산대장 엑셀 경로 (기본값: 현재 폴더의 sample_asset_ledger.xlsx)")
+    parser.add_argument("--output", "-o", default=OUT_PATH,
+                         help="결과 엑셀 저장 경로 (기본값: 현재 폴더의 recalc_result.xlsx)")
+    args = parser.parse_args()
+    IN_PATH = args.input
+    OUT_PATH = args.output
     main()
