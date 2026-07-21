@@ -344,9 +344,9 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
     자본적지출/상각중단/재추정후상각방법은 자산에 이벤트가 있을 때만 값이 채워지므로
     (선택 컬럼), 각각 "짝이 맞는지"와 "값 자체가 유효한지"만 검증한다.
 
-    acq(취득일)는 처분일/재추정일/상각중단시작일·종료일이 취득일보다 앞서는(=취득도
-    하기 전에 이벤트가 발생한) 순서 오류를 잡는 데만 쓰인다 — acq를 넘기지 않으면
-    (기본값 None) 비교 기준이 없으므로 이 순서 검증은 조용히 건너뛴다.
+    acq(취득일)는 처분일/재추정일/상각중단시작일·종료일/자본적지출일이 취득일보다
+    앞서는(=취득도 하기 전에 이벤트가 발생한) 순서 오류를 잡는 데만 쓰인다 — acq를
+    넘기지 않으면(기본값 None) 비교 기준이 없으므로 이 순서 검증은 조용히 건너뛴다.
     """
     errors = []
     if method is not None and method not in KNOWN_METHODS:
@@ -384,6 +384,8 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
         errors.append(f"상각중단시작일 오류(상각중단시작일={susp_start}이 취득일={acq}보다 빠름)")
     if susp_end is not None and acq is not None and susp_end < acq:
         errors.append(f"상각중단종료일 오류(상각중단종료일={susp_end}이 취득일={acq}보다 빠름)")
+    if capex_date is not None and acq is not None and capex_date < acq:
+        errors.append(f"자본적지출일 오류(자본적지출일={capex_date}이 취득일={acq}보다 빠름)")
     return errors
 
 

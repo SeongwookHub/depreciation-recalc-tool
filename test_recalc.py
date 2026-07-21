@@ -326,12 +326,19 @@ class TestValidateAssetInputs:
         assert any("상각중단시작일" in e for e in errors)
         assert any("상각중단종료일" in e for e in errors)
 
+    def test_capex_date_before_acquisition_is_invalid(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, acq=dt.date(2022, 1, 1),
+            capex_date=dt.date(2021, 12, 31), capex_amount=1_000_000)
+        assert any("자본적지출일" in e for e in errors)
+
     def test_dates_on_or_after_acquisition_are_valid(self):
         # 취득일과 같은 날(경계값 포함) 또는 그 이후면 정상 — 순서 검증에 걸리면 안 된다.
         errors = R.validate_asset_inputs(
             cost=10_000_000, salvage=0, life=5, acq=dt.date(2022, 1, 1),
             disposal=dt.date(2022, 1, 1), reest_date=dt.date(2023, 1, 1),
-            susp_start=dt.date(2022, 6, 1), susp_end=dt.date(2022, 12, 31))
+            susp_start=dt.date(2022, 6, 1), susp_end=dt.date(2022, 12, 31),
+            capex_date=dt.date(2022, 1, 1), capex_amount=1_000_000)
         assert errors == []
 
     def test_date_order_checks_skipped_when_acq_not_provided(self):
