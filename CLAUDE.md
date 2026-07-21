@@ -13,7 +13,7 @@ are in Korean — match that when editing.
 
 ```powershell
 # Install deps
-python -m pip install pandas openpyxl anthropic python-dotenv pytest
+python -m pip install -r requirements.txt
 
 # Run the full test suite (this is the primary correctness gate — always run after touching recalc.py)
 python -m pytest test_recalc.py -v
@@ -22,37 +22,58 @@ python -m pytest test_recalc.py -v
 python -m pytest test_recalc.py::TestDoubleDecliningBalance -v
 python -m pytest test_recalc.py::TestDoubleDecliningBalance::test_basic_rate_and_floor -v
 
+# Lint (also runs in CI — keep this clean)
+python -m ruff check .
+
 # Regenerate the sample ledger (133 rows covering all methods/events)
 python generate_sample.py
 
-# Run the tool itself (reads IN_PATH, writes OUT_PATH — see gotcha below)
+# Run the tool itself — with no args, reads config.yaml's input_path/output_path
+# (defaults to sample_asset_ledger.xlsx / recalc_result.xlsx in this folder)
 python recalc.py
+
+# Override the config file, or just the input/output paths, per run
+python recalc.py --config config_회사A.yaml
+python recalc.py --input other_ledger.xlsx --output other_result.xlsx
 ```
 
-CI (`.github/workflows/tests.yml`) just runs `pytest test_recalc.py -v` on push/PR — no lint step exists in this repo.
+CI (`.github/workflows/tests.yml`) installs from `requirements.txt`, then runs `ruff check .` and
+`pytest test_recalc.py -v` on push/PR. `mypy` and `pytest-cov` are useful for occasional deeper quality passes but
+are **not** in `requirements.txt` — install them ad hoc (`pip install mypy pytest-cov`) when you want them.
 
-## Critical gotcha: `IN_PATH`/`OUT_PATH` are hardcoded absolute paths
+## Settings live in `config.yaml`, not in `recalc.py`
 
-`recalc.py` top-of-file constants `IN_PATH`/`OUT_PATH` point at a fixed absolute path
-(`C:\Users\wh981\재무검증도구\depreciation-recalc-tool\...`), **not** the current working directory. Running
-`python recalc.py` from this repo folder reads/writes that other location, not the local
-`sample_asset_ledger.xlsx`/`recalc_result.xlsx`. To regenerate the local sample output, either edit those two
-constants temporarily or do it via Python:
+Company/audit-specific values — `input_path`/`output_path`, `ref_date`, `materiality_threshold`,
+`overall_materiality`/`performance_materiality`, `comparison_years`, `yoy_anomaly_threshold_pct`,
+`anthropic_model`, and `column_map` — are read from `config.yaml` at the repo root, not hardcoded in `recalc.py`.
+`--input`/`--output` CLI args (if passed) win over whatever `config.yaml` says; `--config <path>` swaps which
+YAML file is read entirely (defaults to `config.yaml`). Loading is deliberately fault-tolerant: `load_config()`
+returns `{}` on a missing file or a YAML parse error (never raises), and `resolve_settings()` fills every key from
+`{}` with the same built-in defaults `config.yaml` currently ships with — so tests that `import recalc as R`
+without touching `config.yaml` see identical values to what was previously hardcoded. `column_map` specifically is
+*merged* over the built-in default dict (`_DEFAULT_COLUMN_MAP`), not replaced, so a config that only overrides one
+column still gets sane defaults for the other 19.
 
-```python
-import recalc as R
-R.IN_PATH = "sample_asset_ledger.xlsx"
-R.OUT_PATH = "recalc_result.xlsx"
-R.main()
-```
+**Known trap when wiring a new config-driven global**: Python binds a function's default-argument values *once, at
+def time*, not on every call. `classify_materiality(diff, threshold=MATERIALITY_THRESHOLD)` and
+`detect_yoy_anomalies(df, threshold_pct=YOY_ANOMALY_THRESHOLD_PCT)` both do this — if `main()` called them with no
+second argument, a `--config` override loaded later would be silently ignored (this was a real bug, found and
+fixed). `main()` now passes the current global explicitly to both. If you add another `config.yaml`-backed global
+and a function whose default argument references it, do the same — pass the live global explicitly at the call
+site inside `main()`, don't rely on the parameter default.
 
-Tests never touch the real constants — `TestResultColumnsAfterRemoval._run_main_with` monkeypatches
-`R.IN_PATH`/`R.OUT_PATH` per-test and restores them in a `finally` block. Follow that pattern for any new
-end-to-end test.
+The `if __name__ == "__main__":` block re-reads whichever config file `--config` points to (even if it's the
+default path — the reload is idempotent, so there's no special-casing) and reassigns
+`IN_PATH`/`OUT_PATH`/`REF_DATE`/`FY_YEAR`/`MATERIALITY_THRESHOLD`/`OVERALL_MATERIALITY`/
+`PERFORMANCE_MATERIALITY`/`ANTHROPIC_MODEL`/`COMPARISON_YEARS`/`YOY_ANOMALY_THRESHOLD_PCT`/`COLUMN_MAP` at module
+scope before calling `main()`. Tests never go through this block — `TestResultColumnsAfterRemoval._run_main_with`
+(and similar end-to-end tests) monkeypatch `R.IN_PATH`/`R.OUT_PATH` directly and restore them in a `finally` block.
+Follow that pattern for any new end-to-end test; use `monkeypatch.setattr(R, "COMPARISON_YEARS", [...])` for
+multi-year-sheet tests rather than editing `config.yaml`.
 
 ## Architecture
 
-Everything lives in `recalc.py` (~1900 lines). The pipeline: `resolve_columns()` → per-row `parse_asset_row()` →
+Everything lives in `recalc.py` (~2100 lines). The pipeline: `resolve_columns()` → per-row `parse_asset_row()` →
 per-row `validate_asset_inputs()` (bad rows are isolated, never crash the batch) → `recalc_asset()` /
 `recalc_accumulated_dep()` / `get_period_formula_meta()` → `main()` assembles the workbook via pandas +
 `_inject_recalc_formulas()` + `_write_info_sheet()` + `_format_workbook()`.
@@ -143,8 +164,8 @@ rest of the pipeline is unaffected either way. `_suggest_columns_ai` reuses this
   existing class or add a new one following that naming.
 - Prefer closed-form math checks over hardcoded magic numbers where the method has one (e.g. SYD's fraction series
   sums to exactly `cost - salvage` over `life_years` years — assert against that identity, not a memorized number).
-- Tests that exercise `main()` end-to-end must monkeypatch `R.IN_PATH`/`R.OUT_PATH` (see gotcha above) and restore
-  them in `finally`.
+- Tests that exercise `main()` end-to-end must monkeypatch `R.IN_PATH`/`R.OUT_PATH` (see "Settings live in
+  `config.yaml`" above) and restore them in `finally`.
 - Tests involving the AI path (`_suggest_columns_ai`, `get_ai_estimated_cause`) should monkeypatch the function
   itself or unset `ANTHROPIC_API_KEY` via `monkeypatch.delenv` — don't rely on a real network call.
 - When verifying new Excel-formula logic (`_inject_recalc_formulas`), the reliable method used throughout this
@@ -153,6 +174,13 @@ rest of the pipeline is unaffected either way. `_suggest_columns_ai` reuses this
   independently-computed Python values across the full sample file — a naive "the formula looks right" read is not
   sufficient, since Excel's actual evaluation has caught real bugs (e.g. 생산량비례법's dummy `life=1` placeholder,
   suspension's extended effective end date) that weren't visible from reading the formula string alone.
+- A `pytest --cov=recalc --cov-report=term-missing` pass has previously turned up real, non-trivial 0%-coverage
+  gaps in production paths — not just AI-call bodies or the `__main__` block (both expectedly untested). The
+  biggest one found so far: 정률법 재추정 *without* a method switch (`method="정률법"`, `reest_method=None`) routes
+  through the legacy `declining_balance_current_period_dep()` fast path, which had zero test coverage even though
+  the equivalent 정액법 reest case was tested. When adding a new event combination (reest/capex/suspension ×
+  method), check whether it's actually exercised by an existing test before assuming it is — "정액법 has a test for
+  X" does not imply "정률법/이중체감법/연수합계법 has one too."
 
 ## Sample data
 
