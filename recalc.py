@@ -51,6 +51,10 @@ MATERIALITY_THRESHOLD = 1_000_000
 # "유의한 차이" 자산의 AI 추정원인 코멘트 생성에 사용할 모델.
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
+# 재계산결과 시트의 상각률/재계산 수치가 참조하는 엑셀 수식용 참조 시트 이름.
+RATE_TABLE_SHEET = "상각률표(별표4)"
+INFO_SHEET = "기준정보"
+
 # 다기간(연도별) 비교 대상 회계연도 목록. 기본값처럼 [FY_YEAR] 하나만 두면
 # 기존과 완전히 동일하게 단일 연도만 계산한다. 여러 연도 추이를 보려면
 # 예: COMPARISON_YEARS = [2023, 2024, 2025]
@@ -85,6 +89,7 @@ COLUMN_MAP = {
     "재추정후상각방법": "재추정후상각방법(정액법/정률법)",
     "총예정생산량": "총예정생산량",
     "당기실제생산량": "당기실제생산량",
+    "전기말누적생산량": "전기말누적생산량",
     "자본적지출일": "자본적지출일",
     "자본적지출액": "자본적지출액",
     "상각중단시작일": "상각중단시작일",
@@ -97,17 +102,43 @@ REQUIRED_KEYS = [
     "내용연수", "상각방법", "회사반영상각비",
 ]
 OPTIONAL_KEYS = ["처분일", "재추정일", "재추정내용연수", "재추정후상각방법",
-                 "총예정생산량", "당기실제생산량",
+                 "총예정생산량", "당기실제생산량", "전기말누적생산량",
                  "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
                  "회사반영누계상각액"]
 
-# 국세청 고시 내용연수별 상각률표(정률법). 표에 없는 내용연수는
-# 잔존가치 5% 가정(r = 1-0.05**(1/n))으로 근사한다.
+# 법인세법 시행규칙 [별표4] 감가상각자산의 상각률표(내용연수 2~60년, 정률법 할푼리를
+# 소수로 변환한 값). 표에 없는 내용연수(1년 이하, 60년 초과)만 잔존가치 5% 가정
+# (r = 1-0.05**(1/n))으로 근사한다.
 RATE_TABLE = {
-    2: 0.684, 3: 0.536, 4: 0.528, 5: 0.451, 6: 0.394,
+    2: 0.777, 3: 0.632, 4: 0.528, 5: 0.451, 6: 0.394,
     7: 0.349, 8: 0.313, 9: 0.284, 10: 0.259,
-    11: 0.239, 12: 0.221, 13: 0.206, 14: 0.193, 15: 0.183,
-    16: 0.173, 17: 0.164, 18: 0.157, 19: 0.150, 20: 0.144,
+    11: 0.239, 12: 0.221, 13: 0.206, 14: 0.193, 15: 0.182,
+    16: 0.171, 17: 0.162, 18: 0.154, 19: 0.146, 20: 0.140,
+    21: 0.133, 22: 0.128, 23: 0.123, 24: 0.118, 25: 0.113,
+    26: 0.109, 27: 0.106, 28: 0.102, 29: 0.099, 30: 0.096,
+    31: 0.093, 32: 0.090, 33: 0.087, 34: 0.085, 35: 0.083,
+    36: 0.080, 37: 0.078, 38: 0.076, 39: 0.074, 40: 0.073,
+    41: 0.071, 42: 0.069, 43: 0.068, 44: 0.066, 45: 0.065,
+    46: 0.064, 47: 0.062, 48: 0.061, 49: 0.060, 50: 0.059,
+    51: 0.058, 52: 0.056, 53: 0.055, 54: 0.054, 55: 0.054,
+    56: 0.053, 57: 0.052, 58: 0.051, 59: 0.050, 60: 0.049,
+}
+
+# 위 표와 짝을 이루는 정액법 할푼리(참고/엑셀 상각률표 시트 표시용 — 실제 정액법
+# 계산에는 쓰지 않는다. 정액법은 1/내용연수를 그대로 쓰는 것이 사용자 요청 사항).
+STRAIGHT_LINE_RATE_TABLE = {
+    2: 0.500, 3: 0.333, 4: 0.250, 5: 0.200, 6: 0.166,
+    7: 0.142, 8: 0.125, 9: 0.111, 10: 0.100,
+    11: 0.090, 12: 0.083, 13: 0.076, 14: 0.071, 15: 0.066,
+    16: 0.062, 17: 0.058, 18: 0.055, 19: 0.052, 20: 0.050,
+    21: 0.048, 22: 0.046, 23: 0.044, 24: 0.042, 25: 0.040,
+    26: 0.039, 27: 0.037, 28: 0.036, 29: 0.035, 30: 0.034,
+    31: 0.033, 32: 0.032, 33: 0.031, 34: 0.030, 35: 0.029,
+    36: 0.028, 37: 0.027, 38: 0.027, 39: 0.026, 40: 0.025,
+    41: 0.025, 42: 0.024, 43: 0.024, 44: 0.023, 45: 0.023,
+    46: 0.022, 47: 0.022, 48: 0.021, 49: 0.021, 50: 0.020,
+    51: 0.020, 52: 0.020, 53: 0.019, 54: 0.019, 55: 0.019,
+    56: 0.018, 57: 0.018, 58: 0.018, 59: 0.017, 60: 0.017,
 }
 
 
@@ -120,7 +151,8 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
                            reest_method: str = None,
                            capex_date=None, capex_amount: float = None,
                            susp_start=None, susp_end=None,
-                           accum_reported: float = None) -> list:
+                           accum_reported: float = None,
+                           prior_period_units: float = None) -> list:
     """
     재계산에 들어가기 전 취득원가/잔존가치/내용연수가 계산 가능한 값인지 검증한다.
     문제가 있으면 오류 사유 문자열 리스트를, 문제가 없으면 빈 리스트를 반환한다.
@@ -154,6 +186,8 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
         errors.append(f"상각중단기간 오류(상각중단종료일={susp_end}이 상각중단시작일={susp_start}보다 빠름)")
     if accum_reported is not None and accum_reported < 0:
         errors.append(f"회사반영_전기말감가상각누계액 오류(값={accum_reported:,.0f}원, 0 이상이어야 함)")
+    if prior_period_units is not None and prior_period_units < 0:
+        errors.append(f"전기말누적생산량 오류(값={prior_period_units:,.0f}, 0 이상이어야 함)")
     return errors
 
 
@@ -332,11 +366,16 @@ def declining_balance_current_period_dep(acq, cost, salvage, life_years,
     - 처분: 처분월까지만 그 해의 상각 개월수에 포함한다.
     - 내용연수 종료: 그 해의 상각 종료월(active_end_idx)을 넘어서면 개월수가 0이 되어
       더 이상 상각되지 않는다.
+    - 5% 특례(법인세법 시행규칙 [별표4] 관련 규정): 미상각잔액이 취득가액의 5% 이하로
+      최초로 떨어지는 과세기간에 잔여 전액(회사가 입력한 잔존가치까지)을 그 해에
+      상각한다. 회사가 입력한 잔존가치는 이 바닥값(5%)에 도달하기 전까지는 상각액
+      계산에 영향을 주지 않는다.
     """
     rate = get_rate(life_years)
     start_idx = month_index(acq.year, acq.month)
     active_end_idx = start_idx + life_years * 12 - 1  # 상각 종료월(생애 종료월)
     active_rate = rate
+    five_pct = cost * 0.05
 
     reest_year = reest_date.year if reest_date is not None else None
     disposal_idx = month_index(disposal_date.year, disposal_date.month) if disposal_date is not None else None
@@ -344,12 +383,16 @@ def declining_balance_current_period_dep(acq, cost, salvage, life_years,
     book_value = float(cost)
     current_period_dep = 0.0
     current_period_months = 0
+    opening_book_value = float(cost)
 
     y = acq.year
     while y <= fy_year:
         if reest_year is not None and y == reest_year:
             active_rate = get_rate(reest_life_years)
             active_end_idx = month_index(y, 1) + reest_life_years * 12 - 1
+
+        if y == fy_year:
+            opening_book_value = book_value
 
         year_start_idx = month_index(y, 1)
         year_end_idx = month_index(y, 12)
@@ -362,7 +405,7 @@ def declining_balance_current_period_dep(acq, cost, salvage, life_years,
         dep = 0.0
         if months > 0:
             dep = book_value * active_rate * months / 12
-            if book_value - dep < salvage:
+            if book_value - dep <= five_pct:
                 dep = book_value - salvage
             book_value -= dep
 
@@ -371,7 +414,7 @@ def declining_balance_current_period_dep(acq, cost, salvage, life_years,
             current_period_months = months
         y += 1
 
-    return max(current_period_dep, 0.0), current_period_months
+    return max(current_period_dep, 0.0), current_period_months, opening_book_value
 
 
 # ---------------------------------------------------------------------------
@@ -402,16 +445,22 @@ def nominal_month_index(calendar_idx: int, susp_start_idx, susp_end_idx) -> int:
 
 
 def _declining_balance_year_loop(start_idx, basis, salvage, rate, active_end_idx,
-                                  disposal_idx, susp_start_idx, susp_end_idx, up_to_idx):
+                                  disposal_idx, susp_start_idx, susp_end_idx, up_to_idx,
+                                  tax_cost=None):
     """
     declining_balance_current_period_dep(위)의 연단위 누적 로직을, 특정 구간이
     start_idx부터 up_to_idx(포함)까지 상각됐을 때의 (최종 장부가액, up_to_idx가
     속한 회계연도의 그 해 상각비, 그 해 상각개월수)를 구하도록 일반화한 버전이다.
     상각중단과 겹치는 개월을 그 해의 상각개월수에서 제외하는 점만 원본과 다르다.
+
+    tax_cost: 5% 특례(미상각잔액이 이 금액의 5% 이하가 되면 잔여 전액 상각) 판정에
+    쓰는 취득가액(자본적지출 누계 반영). 지정하지 않으면 basis를 그대로 쓴다
+    (자본적지출로 basis가 커진 구간이 아니라면 basis=원 취득가액과 같으므로 안전).
     """
     if up_to_idx < start_idx:
         return float(basis), 0.0, 0
 
+    five_pct = (tax_cost if tax_cost is not None else basis) * 0.05
     start_year = idx_to_year(start_idx)
     up_to_year = idx_to_year(up_to_idx)
 
@@ -438,7 +487,7 @@ def _declining_balance_year_loop(start_idx, basis, salvage, rate, active_end_idx
         dep = 0.0
         if months > 0:
             dep = book_value * rate * months / 12
-            if book_value - dep < salvage:
+            if book_value - dep <= five_pct:
                 dep = book_value - salvage
             book_value -= dep
 
@@ -454,15 +503,24 @@ def _book_value_at(seg: dict, up_to_idx: int, susp_start_idx, susp_end_idx) -> f
     if up_to_idx < seg["start_idx"]:
         return seg["basis"]
     if seg["method"] == "정액법":
-        nom_up_to = nominal_month_index(up_to_idx, susp_start_idx, susp_end_idx)
-        nom_start = nominal_month_index(seg["start_idx"], susp_start_idx, susp_end_idx)
-        elapsed = max(0, min(nom_up_to - nom_start + 1, seg["life_months"]))
+        # 달력월수에서 상각중단과 겹치는 개월수를 직접 빼는 방식(구간 시작월 자체가
+        # 상각중단 구간 "안"에서 시작하는 경계 케이스 — 예: 재추정이 상각중단 도중에
+        # 발생한 경우 — 에서도 정확하다). nominal_month_index로 두 지점을 각각
+        # 변환해 빼는 방식은 구간 시작월이 중단구간 안이면 그 시작월 자체가 중단
+        # 시작 직전월로 고정돼버려 elapsed가 부정확해지므로 쓰지 않는다.
+        total_months = up_to_idx - seg["start_idx"] + 1
+        susp_months = 0
+        if susp_start_idx is not None:
+            s, e = max(seg["start_idx"], susp_start_idx), min(up_to_idx, susp_end_idx)
+            if s <= e:
+                susp_months = e - s + 1
+        elapsed = max(0, min(total_months - susp_months, seg["life_months"]))
         monthly = (seg["basis"] - seg["salvage"]) / seg["life_months"]
         return seg["basis"] - monthly * elapsed
     else:
         book_value, _, _ = _declining_balance_year_loop(
             seg["start_idx"], seg["basis"], seg["salvage"], seg["rate"], seg["end_idx"],
-            None, susp_start_idx, susp_end_idx, up_to_idx)
+            None, susp_start_idx, susp_end_idx, up_to_idx, tax_cost=seg["tax_cost"])
         return book_value
 
 
@@ -478,14 +536,17 @@ def build_depreciation_schedule(acq, cost, salvage, life_years, method,
     - 같은 날짜에 자본적지출과 재추정이 겹치면 자본적지출을 먼저 반영한다(가산된
       장부가액을 재추정의 기준가로 삼는 것이 실무적으로 자연스럽기 때문).
     - 자본적지출: end_idx/method 불변, basis = 그 시점 장부가액 + 자본적지출액
-      ("잔여 내용연수로 계속 상각").
+      ("잔여 내용연수로 계속 상각"). 정률법 5% 특례의 기준이 되는 취득가액(tax_cost)도
+      같은 금액만큼 늘어난다(자본적지출은 세무상 취득가액에 가산).
     - 재추정: basis = 그 시점 장부가액(가산 없음), method = reest_method or 기존 method,
       end_idx = 재추정월 + reest_life_years*12 - 1 (새 내용연수로 완전히 재설정).
+      tax_cost는 재추정으로 바뀌지 않는다(재추정은 취득가액이 아니라 내용연수/방법만
+      다시 잡는 이벤트이므로).
     """
     start_idx0 = month_index(acq.year, acq.month)
     cur = dict(start_idx=start_idx0, end_idx=start_idx0 + life_years * 12 - 1,
                method=method, basis=float(cost), salvage=float(salvage),
-               life_months=life_years * 12,
+               life_months=life_years * 12, tax_cost=float(cost),
                rate=get_rate(life_years) if method == "정률법" else None)
 
     breakpoints = []
@@ -507,13 +568,14 @@ def build_depreciation_schedule(acq, cost, salvage, life_years, method,
         if bp["kind"] == "capex":
             cur = dict(start_idx=bp["idx"], end_idx=prev_end_idx, method=segments[-1]["method"],
                        basis=book_value + bp["amount"], salvage=segments[-1]["salvage"],
-                       life_months=prev_end_idx - bp["idx"] + 1, rate=segments[-1]["rate"])
+                       life_months=prev_end_idx - bp["idx"] + 1, rate=segments[-1]["rate"],
+                       tax_cost=segments[-1]["tax_cost"] + bp["amount"])
         else:
             new_method = bp["new_method"] or segments[-1]["method"]
             new_life_months = bp["new_life_years"] * 12
             cur = dict(start_idx=bp["idx"], end_idx=bp["idx"] + new_life_months - 1,
                        method=new_method, basis=book_value, salvage=segments[-1]["salvage"],
-                       life_months=new_life_months,
+                       life_months=new_life_months, tax_cost=segments[-1]["tax_cost"],
                        rate=get_rate(bp["new_life_years"]) if new_method == "정률법" else None)
 
     segments.append(cur)
@@ -565,7 +627,7 @@ def segments_current_period_dep(segments: list, disposal_idx, fy_year: int,
         else:
             _, dep, months = _declining_balance_year_loop(
                 seg["start_idx"], seg["basis"], seg["salvage"], seg["rate"], seg["end_idx"],
-                None, susp_start_idx, susp_end_idx, overlap_end)
+                None, susp_start_idx, susp_end_idx, overlap_end, tax_cost=seg["tax_cost"])
             total_dep += dep
             total_months += months
     return total_dep, total_months
@@ -623,7 +685,7 @@ def recalc_asset(acq, cost, salvage, life, method, disposal, reest_date, reest_l
         dep_raw, months = straight_line_current_period_dep(segments, disposal_idx, fy_year)
         active_end_idx = segments[-1]["end_idx"]
     elif method == "정률법":
-        dep_raw, months = declining_balance_current_period_dep(
+        dep_raw, months, _opening_bv = declining_balance_current_period_dep(
             acq, cost, salvage, life, reest_date, reest_life, disposal, fy_year)
         if reest_date is not None:
             active_end_idx = month_index(reest_date.year, 1) + reest_life * 12 - 1
@@ -687,6 +749,116 @@ def recalc_accumulated_dep(acq, cost, salvage, life, method, disposal, reest_dat
             susp_start=susp_start, susp_end=susp_end)
         total += dep
     return total
+
+
+def _segment_book_value_before(segments, cutoff_idx, susp_s, susp_e, default_method):
+    """
+    segments(정액법 또는 정률법 세그먼트 리스트) 안에서 cutoff_idx(달력월, 포함)
+    시점까지 상각했을 때의 실제 장부가액을 구한다. cutoff_idx가 마지막 세그먼트
+    종료월보다 뒤라면(이미 내용연수가 끝난 상태) 마지막 세그먼트의 종료 시점 장부가액
+    (=잔존가치)을 반환한다. build_straight_line_segments가 만든 세그먼트는 "method"
+    키가 없으므로 default_method로 채워 _book_value_at에 넘긴다.
+    """
+    if cutoff_idx < segments[0]["start_idx"]:
+        return segments[0]["basis"]
+    seg = next((s for s in segments if s["start_idx"] <= cutoff_idx <= s["end_idx"]), None)
+    if seg is None:
+        seg = segments[-1]
+        cutoff_idx = seg["end_idx"]
+    if "method" not in seg:
+        seg = dict(seg, method=default_method)
+    return _book_value_at(seg, cutoff_idx, susp_s, susp_e)
+
+
+def get_period_formula_meta(acq, cost, salvage, life, method, disposal, reest_date, reest_life,
+                             fy_year, reest_method=None, capex_date=None, capex_amount=None,
+                             susp_start=None, susp_end=None, prior_period_units=None) -> dict:
+    """
+    재계산결과 시트에 엑셀 수식을 주입하기 위한 메타데이터를 계산한다(recalc_asset이
+    반환하는 상각비 숫자 자체와는 별개로, "그 숫자를 단일 곱셈 수식으로 표현할 수 있는가"와
+    "그 수식에 쓸 상각기준가액/장부가액"만 판단한다). recalc_asset의 계산 결과 자체는
+    건드리지 않는다.
+
+    - basis: 당기 상각비 계산의 기준가액. 정액법은 당기에 적용되는 세그먼트의 고정
+      상각대상 기준액(재추정/자본적지출 전까지는 취득원가와 같음), 정률법은 당기
+      1/1 시점의 실제 장부가액(매년 감소) — 이 경우 prior_fy_end_bv와 같은 값이다.
+    - life_months: 정액법에서 상각률(=12/life_months) 계산에 쓰는, 당기에 적용되는
+      세그먼트의 실제 상각기간(개월). 자본적지출만 있고 재추정이 없으면 "원 내용연수
+      전체"가 아니라 "자본적지출 시점부터 원래 내용연수 종료월까지 남은 개월수"가
+      되므로, 원 내용연수(년)를 그대로 쓰면 안 된다(자본적지출은 잔여 내용연수로
+      재상각하는 정책이기 때문). 재추정이 있으면 재추정후내용연수(년)*12와 같다.
+    - is_simple_current: 당기 회계연도 안에서 상각 기준(세그먼트)이 단 하나뿐이어서
+      "(상각기준가액-잔존가치)*상각률*월수/12" 형태의 단일 셀 수식으로 표현 가능한지.
+      당기 중에 재추정 또는 자본적지출이 발생해 같은 해 안에 기준이 바뀌는 경우만 False.
+    - prior_fy_end_bv: 전기말(=당기 1/1 직전) 시점의 실제 장부가액(처분이 그 전에
+      있었으면 처분 시점에 멈춘 값). "취득원가+자본적지출누계-prior_fy_end_bv"가 곧
+      전기말 감가상각누계액과 같다는 항등식을 이용해 전기말 누계액을 수식화하는 데
+      쓴다. 정액법/정률법 모두 계산 가능하고(당기 안에서 이벤트가 있어도 전기말은
+      그보다 전 시점이라 영향받지 않는다), 생산량비례법은 장부가액 개념 자체가
+      없어(생산량 비율로만 계산) None을 반환한다.
+    - accum_formula_eligible: 전기말 감가상각누계액을 수식으로 표현할 수 있는지.
+      정액법/정률법은 항상 True(위 항등식이 이벤트 유무와 무관하게 성립), 생산량비례법은
+      prior_period_units(전기말누적생산량)이 주어졌을 때만 True.
+    """
+    if method == "생산량비례법":
+        return dict(basis=cost, life_months=None, is_simple_current=True, prior_fy_end_bv=None,
+                    accum_formula_eligible=prior_period_units is not None)
+
+    susp_s = month_index(susp_start.year, susp_start.month) if susp_start is not None else None
+    susp_e = month_index(susp_end.year, susp_end.month) if susp_end is not None else None
+    has_extended = (
+        capex_date is not None
+        or susp_start is not None
+        or (reest_method is not None and reest_method != method)
+    )
+
+    fy_start_idx = month_index(fy_year, 1)
+    disposal_idx = month_index(disposal.year, disposal.month) if disposal is not None else None
+    cutoff_idx = fy_start_idx - 1
+    if disposal_idx is not None:
+        cutoff_idx = min(cutoff_idx, disposal_idx)
+
+    if method == "정률법" and not has_extended:
+        # 구 경로(정률법, 자본적지출/상각중단 없음): 재추정을 항상 회계연도 1/1
+        # 기준으로 적용하므로 한 회계연도 안에서 기준이 둘로 쪼개지는 경우가 없다.
+        # life_months는 정률법 상각률 수식(VLOOKUP)에서 쓰지 않으므로 실사용되지 않는다.
+        # declining_balance_current_period_dep의 연단위 루프는 처분월 이후 개월수가
+        # 0이 되어 book_value가 자동으로 멈추므로 opening_book_value가 이미 처분
+        # 시점 이후 값으로 고정돼 있어(disposal-safe) 별도 처리가 필요 없다.
+        _, _, opening_bv = declining_balance_current_period_dep(
+            acq, cost, salvage, life, reest_date, reest_life, disposal, fy_year)
+        eff_life = reest_life if reest_date is not None else life
+        return dict(basis=opening_bv, life_months=eff_life * 12, is_simple_current=True,
+                    prior_fy_end_bv=opening_bv, accum_formula_eligible=True)
+
+    if has_extended:
+        segments = build_depreciation_schedule(
+            acq, cost, salvage, life, method, reest_date, reest_life, reest_method,
+            capex_date, capex_amount, susp_s, susp_e)
+        segments = apply_suspension_extension(segments, susp_s, susp_e)
+    else:
+        segments = build_straight_line_segments(acq, cost, salvage, life, reest_date, reest_life)
+
+    fy_end_idx = month_index(fy_year, 12)
+    if disposal_idx is not None:
+        fy_end_idx = min(fy_end_idx, disposal_idx)
+
+    overlapping = [s for s in segments if s["start_idx"] <= fy_end_idx and s["end_idx"] >= fy_start_idx]
+    is_simple_current = len(overlapping) <= 1
+
+    opening_seg = next((s for s in segments if s["start_idx"] <= fy_start_idx <= s["end_idx"]), None)
+    if opening_seg is None:
+        opening_seg = overlapping[0] if overlapping else segments[0]
+
+    if opening_seg.get("method", method) == "정액법":
+        basis = opening_seg["basis"]
+    else:
+        basis = _book_value_at(opening_seg, fy_start_idx - 1, susp_s, susp_e)
+
+    prior_fy_end_bv = _segment_book_value_before(segments, cutoff_idx, susp_s, susp_e, method)
+
+    return dict(basis=basis, life_months=opening_seg["life_months"], is_simple_current=is_simple_current,
+                prior_fy_end_bv=prior_fy_end_bv, accum_formula_eligible=True)
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +927,7 @@ def parse_asset_row(r, cols) -> dict:
     """엑셀 한 행에서 계산에 필요한 원시값을 파싱해 dict로 반환한다."""
     total_units_raw = r[cols["총예정생산량"]] if cols["총예정생산량"] else None
     period_units_raw = r[cols["당기실제생산량"]] if cols["당기실제생산량"] else None
+    prior_period_units_raw = r[cols["전기말누적생산량"]] if cols["전기말누적생산량"] else None
     reest_life_raw = r[cols["재추정내용연수"]] if cols["재추정내용연수"] else None
     reest_method_raw = r[cols["재추정후상각방법"]] if cols["재추정후상각방법"] else None
     capex_amount_raw = r[cols["자본적지출액"]] if cols["자본적지출액"] else None
@@ -775,6 +948,8 @@ def parse_asset_row(r, cols) -> dict:
                       if (reest_method_raw is not None and not pd.isna(reest_method_raw)) else None),
         total_units=float(total_units_raw) if (total_units_raw is not None and not pd.isna(total_units_raw)) else None,
         period_units=float(period_units_raw) if (period_units_raw is not None and not pd.isna(period_units_raw)) else None,
+        prior_period_units=(float(prior_period_units_raw)
+                             if (prior_period_units_raw is not None and not pd.isna(prior_period_units_raw)) else None),
         capex_date=to_date_or_none(r[cols["자본적지출일"]]) if cols["자본적지출일"] else None,
         capex_amount=(float(capex_amount_raw)
                       if (capex_amount_raw is not None and not pd.isna(capex_amount_raw)) else None),
@@ -846,7 +1021,7 @@ def main():
 
     error_cols = ["자산명", "자산분류", "취득일", "취득원가", "잔존가치", "내용연수(년)",
                   "상각방법", "회사반영_당기감가상각비", "총예정생산량", "당기실제생산량",
-                  "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
+                  "전기말누적생산량", "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
                   "회사반영_전기말감가상각누계액", "오류사유"]
     rows = []
     error_rows = []
@@ -857,6 +1032,7 @@ def main():
         disposal, reest_date, reest_life, reest_method = (
             p["disposal"], p["reest_date"], p["reest_life"], p["reest_method"])
         total_units, period_units = p["total_units"], p["period_units"]
+        prior_period_units = p["prior_period_units"]
         capex_date, capex_amount = p["capex_date"], p["capex_amount"]
         susp_start, susp_end = p["susp_start"], p["susp_end"]
         accum_reported = p["accum_reported"]
@@ -864,7 +1040,8 @@ def main():
         validation_errors = validate_asset_inputs(
             cost, salvage, life, method=method, total_units=total_units,
             reest_method=reest_method, capex_date=capex_date, capex_amount=capex_amount,
-            susp_start=susp_start, susp_end=susp_end, accum_reported=accum_reported)
+            susp_start=susp_start, susp_end=susp_end, accum_reported=accum_reported,
+            prior_period_units=prior_period_units)
         if validation_errors:
             error_rows.append({
                 "자산명": p["자산명"],
@@ -877,6 +1054,7 @@ def main():
                 "회사반영_당기감가상각비": reported,
                 "총예정생산량": total_units,
                 "당기실제생산량": period_units,
+                "전기말누적생산량": prior_period_units,
                 "자본적지출일": capex_date,
                 "자본적지출액": capex_amount,
                 "상각중단시작일": susp_start,
@@ -908,6 +1086,52 @@ def main():
         else:
             accum_match = "-"
 
+        # 엑셀 수식 주입용 메타데이터: 상각률/감가상각대상금액/재계산 수치를 실제 셀
+        # 수식으로 연결하기 위해 필요한 상각기준가액과 "단일 수식으로 표현 가능한가"를
+        # 계산한다(재계산 숫자 자체는 위 recalc_asset/recalc_accumulated_dep 결과를
+        # 그대로 쓰고, 여기서는 표시 방식만 결정한다).
+        meta = get_period_formula_meta(
+            acq, cost, salvage, life, method, disposal, reest_date, reest_life, FY_YEAR,
+            reest_method=reest_method, capex_date=capex_date, capex_amount=capex_amount,
+            susp_start=susp_start, susp_end=susp_end, prior_period_units=prior_period_units)
+        basis = meta["basis"]
+        subject_amount = basis - salvage
+        life_months_applied = meta["life_months"]
+        prior_fy_end_bv = meta["prior_fy_end_bv"]
+
+        # 당기말 누적생산량(생산량비례법 참고용)과 당기말 감가상각누계액(모든 상각방법
+        # 공통 롤포워드: 당기말 = 전기말 + 당기감가상각비)은 회사반영/재계산 양쪽 모두
+        # 이미 있는 값들의 단순 합산이라 항상 수식으로 연결할 수 있다.
+        cur_period_units = (prior_period_units + period_units
+                             if (prior_period_units is not None and period_units is not None) else None)
+        accum_reported_end = accum_reported + reported if accum_reported is not None else None
+        accum_recalc_end = accum_recalc + recalced if accum_recalc is not None else None
+        accum_end_diff = (accum_recalc_end - accum_reported_end
+                           if (accum_recalc_end is not None and accum_reported_end is not None) else None)
+        if accum_end_diff is not None:
+            accum_end_match = "일치" if accum_end_diff == 0 else "불일치"
+        else:
+            accum_end_match = "-"
+
+        eff_method = reest_method if (reest_date is not None and reest_method is not None) else method
+        eff_life = reest_life if reest_date is not None else life
+        if eff_method == "생산량비례법":
+            rate_value = "-"
+        elif eff_method == "정률법":
+            rate_value = get_rate(eff_life)
+        else:
+            # 정액법은 원 내용연수(년)가 아니라 "당기에 적용되는 세그먼트의 실제
+            # 상각기간"으로 상각률을 구해야 한다 — 자본적지출만 있고 재추정이 없으면
+            # 잔여 내용연수(개월)가 원 내용연수*12보다 짧기 때문(자본적지출 시점부터
+            # 원래 내용연수 종료월까지 남은 개월수로 재상각하는 정책).
+            rate_value = 12 / life_months_applied
+
+        if meta["accum_formula_eligible"]:
+            accum_formula_note = "수식"
+        else:
+            accum_formula_note = "값(전기말누적생산량 미입력)"
+        current_formula_note = "수식" if meta["is_simple_current"] else "값(당기중 기준변경-복합계산)"
+
         diff = recalced - reported
         match = "일치" if diff == 0 else "불일치"
         materiality = classify_materiality(diff)
@@ -934,20 +1158,27 @@ def main():
             "취득일": acq,
             "취득원가": cost,
             "잔존가치": salvage,
-            "내용연수(년)": life,
             "상각방법": method,
+            "내용연수(년)": life,
+            "상각률": rate_value,
             "처분일": disposal,
             "내용연수재추정일": reest_date,
             "재추정후내용연수(년)": reest_life,
             "재추정후상각방법": reest_method,
             "총예정생산량": total_units,
             "당기실제생산량": period_units,
+            "전기말누적생산량": prior_period_units,
+            "당기말누적생산량": cur_period_units,
             "자본적지출일": capex_date,
             "자본적지출액": capex_amount,
             "상각중단시작일": susp_start,
             "상각중단종료일": susp_end,
             "경과개월수(취득일~기준일)": elapsed,
             "당기해당월수": cur_months,
+            "적용내용연수(개월)": life_months_applied,
+            "상각기준가액(당기)": basis,
+            "감가상각대상금액": subject_amount,
+            "전기말장부가액": prior_fy_end_bv,
             "내용연수종료여부": "종료" if life_ended else "-",
             "비고": note,
             "회사반영_당기감가상각비": reported,
@@ -957,8 +1188,14 @@ def main():
             "재계산_전기말감가상각누계액": accum_recalc,
             "누계액차이(재계산-회사반영)": accum_diff,
             "누계액일치여부": accum_match,
+            "회사반영_당기말감가상각누계액": accum_reported_end,
+            "재계산_당기말감가상각누계액": accum_recalc_end,
+            "당기말누계액차이(재계산-회사반영)": accum_end_diff,
+            "당기말누계액일치여부": accum_end_match,
             "일치여부": match,
             "중요성구분": materiality,
+            "당기수식여부": current_formula_note,
+            "누계수식여부": accum_formula_note,
             "추정원인": cause,
             "추정원인출처": cause_source,
         })
@@ -986,6 +1223,17 @@ def main():
             columns="회계연도", values="재계산_당기감가상각비",
         ).reset_index()
 
+    # "재계산결과" 시트의 상각률/재계산 수치를 실제 엑셀 수식으로 연결하기 위한
+    # 참조용 시트 2개. 법인세법 시행규칙 [별표4] 상각률표 원문(정률법 VLOOKUP 원본)과,
+    # 기준일/전기말일자/중요성기준금액 등 수식에서 참조할 기준값을 담는다.
+    rate_table_df = pd.DataFrame(
+        {
+            "내용연수(년)": list(range(2, 61)),
+            "정액법할푼리": [STRAIGHT_LINE_RATE_TABLE[n] for n in range(2, 61)],
+            "정률법할푼리": [RATE_TABLE[n] for n in range(2, 61)],
+        }
+    )
+
     with pd.ExcelWriter(OUT_PATH, engine="openpyxl") as writer:
         result_df.to_excel(writer, sheet_name="재계산결과", index=False)
         diff_df.to_excel(writer, sheet_name="차이자산", index=False)
@@ -995,8 +1243,12 @@ def main():
         if trend_df is not None:
             trend_df.to_excel(writer, sheet_name="연도별추이", index=False)
             pivot_df.to_excel(writer, sheet_name="연도별요약", index=False)
+        rate_table_df.to_excel(writer, sheet_name=RATE_TABLE_SHEET, index=False)
+        _write_info_sheet(writer.book, REF_DATE, FY_YEAR, dt.date(FY_YEAR - 1, 12, 31),
+                           MATERIALITY_THRESHOLD, has_trend=trend_df is not None)
+        _inject_recalc_formulas(writer.book["재계산결과"], result_df)
         _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, category_summary_df,
-                          trend_df, pivot_df)
+                          trend_df, pivot_df, rate_table_df)
 
     print("DONE:", OUT_PATH)
     print(f"기준일: {REF_DATE}, 당기: {FY_YEAR}년, 중요성기준: {MATERIALITY_THRESHOLD:,}원")
@@ -1014,8 +1266,194 @@ def main():
               f"전년대비 {YOY_ANOMALY_THRESHOLD_PCT}% 이상 증감 경고 {warn_count}건")
 
 
+def _inject_recalc_formulas(ws, df):
+    """
+    '재계산결과' 시트의 파생 컬럼(상각률/감가상각대상금액/재계산_당기감가상각비/차이/
+    재계산_전기말감가상각누계액/누계액차이/당기말누적생산량/회사반영·재계산_당기말감가상각누계액/
+    당기말누계액차이)을 실제 엑셀 셀 수식으로 덮어쓴다. df는 이미 to_excel로 값이 쓰인
+    것과 같은 DataFrame(순서/값 동일)이며, 여기서는 "당기수식여부"/"누계수식여부" 컬럼으로
+    단순(수식 가능)/복합(값 유지) 케이스만 구분한다 — 상각비 숫자 자체는 이미 값으로
+    들어가 있으므로, 수식으로 바꿔도 동일한 값이 나오도록 재현하는 것이 목표다(실제
+    계산 로직은 여전히 Python이 담당).
+
+    전기말 감가상각누계액은 "(취득원가+자본적지출)-전기말장부가액"이라는 항등식을
+    이용한다(투입금액 총액에서 현재 남은 장부가액을 빼면 그동안 상각된 누계액과
+    같다는 관계 — 정액법/정률법 모두, 이벤트 유무와 무관하게 성립). 당기말은 모든
+    상각방법 공통으로 "전기말+당기감가상각비" 롤포워드로 구한다.
+
+    "일치여부"/"중요성구분"/"누계액일치여부"/"당기말누계액일치여부" 등 분류 컬�럼은
+    건드리지 않으므로, 이 함수는 _format_workbook의 "불일치 행 빨간칠" 조건부서식
+    (값 기준 판정)보다 앞이든 뒤든 순서에 상관없이 호출해도 된다.
+    """
+    col_names = list(df.columns)
+    letter = {name: get_column_letter(col_names.index(name) + 1) for name in col_names}
+
+    for i in range(len(df)):
+        r = i + 2  # 엑셀 행(1행은 헤더)
+        row = df.iloc[i]
+
+        acq = f'{letter["취득일"]}{r}'
+        cost = f'{letter["취득원가"]}{r}'
+        salvage = f'{letter["잔존가치"]}{r}'
+        method = f'{letter["상각방법"]}{r}'
+        life = f'{letter["내용연수(년)"]}{r}'
+        rate = f'{letter["상각률"]}{r}'
+        reest = f'{letter["내용연수재추정일"]}{r}'
+        reest_life = f'{letter["재추정후내용연수(년)"]}{r}'
+        reest_method = f'{letter["재추정후상각방법"]}{r}'
+        months = f'{letter["당기해당월수"]}{r}'
+        applied_life_months = f'{letter["적용내용연수(개월)"]}{r}'
+        basis = f'{letter["상각기준가액(당기)"]}{r}'
+        subject = f'{letter["감가상각대상금액"]}{r}'
+        prior_bv = f'{letter["전기말장부가액"]}{r}'
+        capex_dt = f'{letter["자본적지출일"]}{r}'
+        capex_amt = f'{letter["자본적지출액"]}{r}'
+        period_units = f'{letter["당기실제생산량"]}{r}'
+        total_units = f'{letter["총예정생산량"]}{r}'
+        prior_units = f'{letter["전기말누적생산량"]}{r}'
+        cur_units = f'{letter["당기말누적생산량"]}{r}'
+        reported = f'{letter["회사반영_당기감가상각비"]}{r}'
+        recalced = f'{letter["재계산_당기감가상각비"]}{r}'
+        accum_reported = f'{letter["회사반영_전기말감가상각누계액"]}{r}'
+        accum_recalc = f'{letter["재계산_전기말감가상각누계액"]}{r}'
+        accum_reported_end = f'{letter["회사반영_당기말감가상각누계액"]}{r}'
+        accum_recalc_end = f'{letter["재계산_당기말감가상각누계액"]}{r}'
+
+        eff_method = f'IF({reest}<>"",IF({reest_method}<>"",{reest_method},{method}),{method})'
+        eff_life = f'IF({reest}<>"",{reest_life},{life})'
+        # 당기 상각비 수식(정률법 5%컷오프 판정)에서 쓰는 취득가액: 이 수식은
+        # "당기수식여부=수식"인 행에서만 쓰이는데, 그 조건 자체가 "당기 회계연도 안에서
+        # 자본적지출이 발생하지 않음(=발생했다면 반드시 그 전 회계연도)"을 내포하므로
+        # 자본적지출액을 무조건 더해도 된다.
+        tax_cost_expr = f'({cost}+IF({capex_amt}<>"",{capex_amt},0))'
+        # 전기말 누계액 수식에서 쓰는 취득가액은 다르다 — 자본적지출이 당기(또는 그
+        # 이후)에 발생했다면 전기말 시점에는 아직 반영되지 않았어야 하므로, 자본적지출일이
+        # 전기말일자 이전일 때만 더한다.
+        tax_cost_prior_expr = (
+            f'({cost}+IF(AND({capex_amt}<>"",{capex_dt}<=\'{INFO_SHEET}\'!$E$4),{capex_amt},0))'
+        )
+
+        # 정률법은 VLOOKUP(내용연수-년)을 그대로 쓰지만, 정액법은 원 내용연수(년)가
+        # 아니라 "적용내용연수(개월)"(자본적지출로 잔여기간이 줄었을 수 있음)로
+        # 상각률을 구해야 한다 — main()의 rate_value 계산과 동일한 로직.
+        ws[rate] = (
+            f'=IF({eff_method}="정률법",VLOOKUP({eff_life},\'{RATE_TABLE_SHEET}\'!$A$2:$C$60,3,FALSE),'
+            f'IF({eff_method}="생산량비례법","-",12/{applied_life_months}))'
+        )
+        ws[subject] = f"={basis}-{salvage}"
+        ws[f'{letter["차이(재계산-회사반영)"]}{r}'] = f"={recalced}-{reported}"
+
+        if row["당기수식여부"] == "수식":
+            ws[recalced] = (
+                f'=IF({eff_method}="생산량비례법",({cost}-{salvage})*{period_units}/{total_units},'
+                f'IF({eff_method}="정률법",'
+                f'IF({basis}-{basis}*{rate}*{months}/12<={tax_cost_expr}*0.05,{subject},'
+                f'{basis}*{rate}*{months}/12),'
+                f'{subject}*{rate}*{months}/12))'
+            )
+
+        # 당기말누적생산량(생산량비례법 참고용, 다른 방법은 두 값 다 비어있어 자동으로 빈 값)
+        ws[cur_units] = f'=IF(OR({prior_units}="",{period_units}=""),"",{prior_units}+{period_units})'
+
+        if row["누계수식여부"] == "수식":
+            ws[accum_recalc] = (
+                f'=IF({method}="생산량비례법",IF({prior_units}<>"",({cost}-{salvage})*{prior_units}/{total_units},""),'
+                f'{tax_cost_prior_expr}-{prior_bv})'
+            )
+
+        if pd.notna(row["누계액차이(재계산-회사반영)"]):
+            ws[f'{letter["누계액차이(재계산-회사반영)"]}{r}'] = f"={accum_recalc}-{accum_reported}"
+
+        # 당기말 감가상각누계액 = 전기말 + 당기감가상각비 롤포워드(모든 상각방법 공통).
+        # 전기말 셀이 비어 있으면(예: 생산량비례법인데 전기말누적생산량 미입력) 그대로 공란.
+        ws[accum_reported_end] = f'=IF({accum_reported}="","",{accum_reported}+{reported})'
+        ws[accum_recalc_end] = f'=IF({accum_recalc}="","",{accum_recalc}+{recalced})'
+
+        if pd.notna(row["당기말누계액차이(재계산-회사반영)"]):
+            ws[f'{letter["당기말누계액차이(재계산-회사반영)"]}{r}'] = f"={accum_recalc_end}-{accum_reported_end}"
+
+
+def _write_info_sheet(wb, ref_date, fy_year, prior_fy_end, materiality_threshold, has_trend=False):
+    """
+    '기준정보' 시트를 워크북 맨 앞(0번 탭)에 만든다. A열에는 이 프로그램이 어떻게
+    동작하는지 / 결과 파일이 어떤 과정을 거쳐 만들어지는지 / 시트별로 무엇을
+    보여주는지를 설명하는 안내문을, D~E열에는 이번 실행에 쓰인 기준값(기준일 등)
+    표를 둔다. 설명문 길이가 늘어나도 D~E열 표 위치(고정 4행)는 영향받지 않도록
+    분리해뒀다 — _inject_recalc_formulas()가 이 표의 전기말일자 셀(E4)을
+    '기준정보'!$E$4로 직접 참조하므로, 이 표의 위치를 바꿀 때는 그 참조도 함께 고쳐야 한다.
+    """
+    ws = wb.create_sheet(INFO_SHEET, 0)
+    bold = Font(bold=True)
+    title_font = Font(bold=True, size=14)
+
+    lines = [
+        ("이 결과 파일 읽는 법", title_font),
+        ("", None),
+        ("1. 이 프로그램은 무엇을 하나요?", bold),
+        ("회사가 작성한 고정자산대장(엑셀) 하나를 입력받아, 자산마다 정액법/정률법/생산량비례법 등", None),
+        ("자기 상각방법에 맞는 당기 감가상각비를 이 프로그램이 회사와 무관하게 독립적으로 다시 계산합니다.", None),
+        ("그 재계산 금액과 회사가 장부에 반영한 금액을 자산별로 대조해서, 금액이 다른 자산만 골라 보여줍니다.", None),
+        ("즉 \"회사가 계산한 감가상각비가 맞는지\"를 사람이 일일이 엑셀 수식으로 대조하지 않고 자동으로 검증하는 도구입니다.", None),
+        ("", None),
+        ("2. 결과 파일은 어떤 과정을 거쳐 만들어지나요?", bold),
+        ("① 컬럼 인식 — 입력 파일에서 취득일·취득원가·상각방법 등 필요한 컬럼을 찾습니다(컬럼명이 달라도 매핑 가능).", None),
+        ("② 입력값 검증 — 내용연수가 0 이하이거나 잔존가치가 취득원가보다 큰 것처럼 계산 자체가 불가능한", None),
+        ("   자산은 재계산을 시도하지 않고 [데이터오류] 시트로 분리합니다.", None),
+        ("③ 자산별 재계산 — 나머지 자산은 취득일부터 기준일까지 월할상각(정액법), 연도별 장부가액 감소(정률법),", None),
+        ("   생산량 비율(생산량비례법)로 당기 감가상각비를 다시 계산합니다. 처분·내용연수 재추정·자본적지출·", None),
+        ("   감가상각중단 같은 이벤트가 있는 자산도 그 이벤트를 반영해 계산합니다.", None),
+        ("④ 비교 및 분류 — 회사반영 금액과 재계산 금액을 비교해 일치/불일치, 중요성 기준(경미한 차이/유의한 차이)을", None),
+        ("   판정합니다. 전기말 감가상각누계액도 참고용으로 같은 방식으로 비교합니다(일치여부 판정에는 영향 없음).", None),
+        ("⑤ 원인 추정 — 불일치 자산 중 처분·재추정 등 이미 계산된 정보로 설명되는 경우는 규칙으로, 애매한", None),
+        ("   경우는 (설정된 경우) AI로 차이 원인을 한 줄 추정합니다.", None),
+        ("⑥ 엑셀 저장 — 위 결과를 시트별로 정리해 저장합니다. 상각률·재계산 감가상각비 등 재계산 관련 수치는", None),
+        ("   고정된 값이 아니라 실제 엑셀 수식으로 연결돼 있어, 셀을 눌러보면 어떻게 계산됐는지 확인하거나", None),
+        ("   내용연수 같은 입력값을 바꿔가며 재계산 결과가 어떻게 달라지는지 직접 시험해볼 수 있습니다.", None),
+        ("", None),
+        ("3. 시트별 설명", bold),
+        ("기준정보 — 지금 보고 계신 이 시트. 프로그램 안내와 이 결과 파일을 만들 때 쓰인 기준값.", None),
+        ("재계산결과 — 전체 자산의 상세 재계산 내역(입력값·계산과정·회사반영/재계산 금액·차이·일치여부 등).", None),
+        ("차이자산 — [재계산결과] 중 회사반영 금액과 재계산 금액이 다른 자산만 모은 시트(차이금액 큰 순).", None),
+        ("유의한차이자산 — [차이자산] 중에서도 중요성 기준(아래 표) 이상 차이나는 자산만 별도로 정리한 시트.", None),
+        ("데이터오류 — 취득원가·잔존가치·내용연수 값 자체가 계산 불가능해 재계산을 시도하지 않은 자산과 그 사유.", None),
+        ("자산군별통계 — 유형자산/무형자산 등 자산분류별 전체건수·불일치건수·불일치율 등 집계.", None),
+        ("상각률표(별표4) — 정률법 재계산에 쓰인 법인세법 시행규칙 [별표4] 상각률표 원문. [재계산결과]의", None),
+        ("   \"상각률\" 수식이 이 표를 참조합니다.", None),
+        ("연도별추이 / 연도별요약 — 여러 회계연도를 비교 설정했을 때만 생성되는, 자산별 연도별 상각비 추이와" +
+         ("(이번 결과 파일에 포함됨)" if has_trend else "(이번 결과 파일에는 없음 — 단일 연도만 계산)"), None),
+        ("   전년대비 이상 증감 탐지 시트.", None),
+    ]
+    for row_idx, (text, font) in enumerate(lines, start=1):
+        c = ws.cell(row=row_idx, column=1, value=text)
+        if font is not None:
+            c.font = font
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    title_cell = ws.cell(row=1, column=4, value="이 결과 파일의 기준값")
+    title_cell.font, title_cell.fill = header_font, header_fill
+    ws.cell(row=1, column=5).fill = header_fill
+    # 전기말일자는 _inject_recalc_formulas()가 '기준정보'!$E$4로 직접 참조하므로
+    # 이 표의 행 위치(1행=제목, 2~5행=값)를 바꿀 때는 그 참조도 함께 고쳐야 한다.
+    table = [
+        ("기준일", ref_date, "yyyy-mm-dd"),
+        ("당기회계연도", fy_year, None),
+        ("전기말일자", prior_fy_end, "yyyy-mm-dd"),
+        ("중요성기준금액", materiality_threshold, "#,##0"),
+    ]
+    for i, (label, value, fmt) in enumerate(table, start=2):
+        ws.cell(row=i, column=4, value=label)
+        vc = ws.cell(row=i, column=5, value=value)
+        if fmt is not None:
+            vc.number_format = fmt
+
+    ws.column_dimensions["A"].width = 105
+    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["E"].width = 16
+
+
 def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, category_summary_df,
-                      trend_df=None, pivot_df=None):
+                      trend_df=None, pivot_df=None, rate_table_df=None):
     wb = writer.book
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -1027,9 +1465,12 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, cat
     date_cols = ["취득일", "처분일", "내용연수재추정일", "검토일",
                  "자본적지출일", "상각중단시작일", "상각중단종료일"]
     money_cols = ["취득원가", "잔존가치", "회사반영_당기감가상각비", "재계산_당기감가상각비",
-                  "차이(재계산-회사반영)", "자본적지출액",
+                  "차이(재계산-회사반영)", "자본적지출액", "상각기준가액(당기)", "감가상각대상금액",
+                  "전기말장부가액", "총예정생산량", "당기실제생산량", "전기말누적생산량", "당기말누적생산량",
                   "회사반영_전기말감가상각누계액", "재계산_전기말감가상각누계액",
-                  "누계액차이(재계산-회사반영)"]
+                  "누계액차이(재계산-회사반영)", "회사반영_당기말감가상각누계액", "재계산_당기말감가상각누계액",
+                  "당기말누계액차이(재계산-회사반영)"]
+    rate_cols = ["상각률", "정액법할푼리", "정률법할푼리"]
 
     sheets = [
         ("재계산결과", result_df), ("차이자산", diff_df),
@@ -1038,6 +1479,8 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, cat
     ]
     if trend_df is not None:
         sheets += [("연도별추이", trend_df), ("연도별요약", pivot_df)]
+    if rate_table_df is not None:
+        sheets.append((RATE_TABLE_SHEET, rate_table_df))
 
     for sheet_name, df in sheets:
         ws = wb[sheet_name]
@@ -1061,6 +1504,9 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, cat
             elif col_name in money_cols or is_pivot_year_col:
                 for row_idx in range(2, n_rows + 2):
                     ws.cell(row=row_idx, column=col_idx).number_format = "#,##0"
+            elif col_name in rate_cols:
+                for row_idx in range(2, n_rows + 2):
+                    ws.cell(row=row_idx, column=col_idx).number_format = "0.000"
             if col_name in ("추정원인", "오류사유", "검토의견"):
                 ws.column_dimensions[letter].width = 60
             else:

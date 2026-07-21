@@ -414,7 +414,8 @@ class TestRuleBasedCause:
 def _make_cols(df):
     required = ["자산명", "자산분류", "취득일", "취득원가", "잔존가치", "내용연수", "상각방법", "회사반영상각비"]
     optional = ["처분일", "재추정일", "재추정내용연수", "재추정후상각방법", "총예정생산량", "당기실제생산량",
-                "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일", "회사반영누계상각액"]
+                "전기말누적생산량", "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
+                "회사반영누계상각액"]
     cols = {k: k for k in required}
     cols.update({k: (k if k in df.columns else None) for k in optional})
     return cols
@@ -540,6 +541,12 @@ class TestValidateAssetInputsExtendedEvents:
             capex_date=dt.date(2024, 1, 1), capex_amount=1_000,
             susp_start=dt.date(2024, 1, 1), susp_end=dt.date(2024, 6, 1))
         assert errors == []
+
+    def test_negative_prior_period_units_is_invalid(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, method="생산량비례법", total_units=1_000,
+            prior_period_units=-1)
+        assert any("전기말누적생산량" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------
@@ -720,3 +727,189 @@ class TestAccumulatedDepreciation:
             disposal=None, reest_date=None, reest_life=None, fy_year=2025,
             capex_date=dt.date(2023, 1, 1), capex_amount=2_400_000)
         assert accum == 6_685_714
+
+
+# ---------------------------------------------------------------------------
+# 17) 법인세법 시행규칙 [별표4] 상각률표 반영 (RATE_TABLE 전면 교체)
+# ---------------------------------------------------------------------------
+class TestRateTable:
+    def test_life2_life3_match_official_table(self):
+        # 별표4 정률법 할분리: 2년=777(0.777), 3년=632(0.632).
+        # 기존 코드값(0.684/0.536)은 별표4와 달라 이번에 교체됐다.
+        assert R.RATE_TABLE[2] == 0.777
+        assert R.RATE_TABLE[3] == 0.632
+        assert R.get_rate(2) == 0.777
+        assert R.get_rate(3) == 0.632
+
+    def test_life15_to_20_match_official_table_exactly(self):
+        # 기존 근사식(1-0.05**(1/n)) 반올림값과 별표4 값이 15~20년 구간에서
+        # 소수 셋째 자리가 달랐다(예: 15년 0.183 -> 0.182). 별표4 값을 그대로 씀.
+        expected = {15: 0.182, 16: 0.171, 17: 0.162, 18: 0.154, 19: 0.146, 20: 0.140}
+        for life, rate in expected.items():
+            assert R.RATE_TABLE[life] == rate
+
+    def test_life60_is_last_table_entry(self):
+        assert R.RATE_TABLE[60] == 0.049
+
+    def test_get_rate_falls_back_to_approximation_beyond_table(self):
+        # 별표4 범위(2~60년) 밖은 여전히 근사식(1-0.05**(1/n))으로 근사한다.
+        assert 61 not in R.RATE_TABLE
+        assert R.get_rate(61) == round(1 - 0.05 ** (1 / 61), 3)
+
+
+# ---------------------------------------------------------------------------
+# 18) 정률법 5% 잔존가액 특례(법인세법 시행규칙 [별표4] 관련 규정)
+# ---------------------------------------------------------------------------
+class TestDecliningBalance5PctFloor:
+    def test_full_writeoff_when_book_value_first_hits_5pct_of_cost(self):
+        # 취득 2021-01-01, 10,000,000원, 내용연수5년(상각률 0.451), 잔존가치 0.
+        # 연도별 장부가액: 5,490,000 -> 3,014,010 -> 1,654,691.49 -> 908,426.43.
+        # 2025년(5년차, 내용연수 마지막 해): 정상계산 dep=908,426.43*0.451=409,700.32면
+        #   미상각잔액 498,726.11원이 남아 "잔존가치 미만" 조건(구 로직, salvage=0)에는
+        #   걸리지 않아 그대로 남아버린다. 새 5% 특례(취득가액의 5%=500,000원 기준)는
+        #   498,726.11<=500,000이므로 그 해에 잔여 전액(908,426.43원)을 상각한다.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=5, method="정률법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+        )
+        assert dep == 908_426
+        assert months == 12
+
+    def test_year_before_floor_is_unaffected(self):
+        # 같은 자산의 2024년(4년차)은 아직 5% 기준에 못 미치므로(908,426.43>500,000)
+        # 정상적인 감가상각률 계산만 적용된다: 1,654,691.49*0.451≈746,265~746,266
+        # (부동소수 누적 오차로 실행 결과는 746,266원 — 실제 실행 결과로 확정).
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=5, method="정률법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2024, 12, 31), fy_year=2024,
+        )
+        assert dep == 746_266
+
+    def test_5pct_threshold_uses_tax_cost_including_capex(self):
+        # 정률법 + 자본적지출(방법변경 없음) 조합: 5% 기준이 원 취득원가가 아니라
+        # 취득원가+자본적지출 누계(세무상 취득가액)를 기준으로 계산되는지 확인.
+        # 취득 2021-01-01, 10,000,000원, 내용연수5년(상각률 0.451), 2022-01-01
+        # 자본적지출 5,000,000원(취득가액 기준 15,000,000원의 5%=750,000원이 새 기준).
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=5, method="정률법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            capex_date=dt.date(2022, 1, 1), capex_amount=5_000_000,
+        )
+        # 자본적지출로 취득가액(15,000,000원) 자체가 커져 5% 기준(750,000원)도 커지므로,
+        # 자본적지출이 없을 때(기준 500,000원)보다 조기에(또는 다른 시점에) 완전상각될
+        # 수 있다 — 정확한 시점은 손계산 대신 실제 실행 결과로 다음을 검증한다:
+        # 자본적지출 미반영(원 취득원가 10,000,000원 기준 5%=500,000원)으로 계산했을 때와
+        # 결과가 달라야 한다(취득가액 확장이 실제로 반영됐는지 확인).
+        dep_no_capex, _, _, _ = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=5, method="정률법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+        )
+        assert dep != dep_no_capex
+
+
+# ---------------------------------------------------------------------------
+# 19) 엑셀 수식 주입용 메타데이터 (get_period_formula_meta)
+# ---------------------------------------------------------------------------
+class TestPeriodFormulaMeta:
+    def test_plain_straight_line_is_simple_and_accum_eligible(self):
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2020, 1, 1), cost=12_000_000, salvage=0, life=10, method="정액법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025)
+        assert meta["basis"] == 12_000_000
+        assert meta["life_months"] == 120
+        assert meta["is_simple_current"] is True
+        assert meta["accum_formula_eligible"] is True
+        # 취득 2020-01-01부터 전기말(2024-12-31)까지 60개월 * 월상각 100,000원 = 6,000,000원
+        # 상각됐으므로 전기말장부가액 = 12,000,000 - 6,000,000 = 6,000,000원.
+        assert meta["prior_fy_end_bv"] == 6_000_000
+
+    def test_plain_declining_balance_is_simple_and_accum_eligible(self):
+        # "(취득원가+자본적지출)-전기말장부가액" 항등식 덕분에 정률법도(연도별 복리라도)
+        # 전기말 누계액을 단일 수식으로 표현할 수 있다 — basis(=당기 1/1 시점 장부가액)와
+        # prior_fy_end_bv는 정률법에서는 같은 값이다.
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=5, method="정률법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2024)
+        assert meta["basis"] == 1_654_691.49
+        assert meta["life_months"] == 60
+        assert meta["is_simple_current"] is True
+        assert meta["accum_formula_eligible"] is True
+        assert meta["prior_fy_end_bv"] == meta["basis"]
+
+    def test_prior_year_capex_gives_remaining_life_months_not_original(self):
+        # 자본적지출이 전기 이전에 있으면(당기 안에서 기준이 안 바뀌므로) 단순
+        # 케이스지만, 상각률 계산에 쓸 life_months는 "원 내용연수*12"가 아니라
+        # "자본적지출 시점부터 남은 개월수"여야 한다(잔여내용연수로 재상각 정책).
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2020, 1, 1), cost=12_000_000, salvage=0, life=10, method="정액법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025,
+            capex_date=dt.date(2023, 1, 1), capex_amount=2_400_000)
+        assert meta["basis"] == 10_800_000
+        assert meta["life_months"] == 84  # 원 내용연수 120개월이 아니라 잔여 84개월
+        assert meta["is_simple_current"] is True
+        # recalc_accumulated_dep 손계산 사례(TestAccumulatedDepreciation)와 동일한 자산 —
+        # (12,000,000+2,400,000)-전기말장부가액이 6,685,714원과 일치해야 한다.
+        assert round(14_400_000 - meta["prior_fy_end_bv"]) == 6_685_714
+
+    def test_capex_within_current_fy_is_complex(self):
+        # 당기 중에 자본적지출이 발생하면 그 해 안에서 기준(basis)이 바뀌므로
+        # 단일 셀 수식으로 표현할 수 없다(당기 감가상각비만 그렇다 — 전기말은
+        # 그보다 앞선 시점이라 여전히 수식 가능).
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2020, 1, 1), cost=12_000_000, salvage=0, life=10, method="정액법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025,
+            capex_date=dt.date(2025, 7, 1), capex_amount=2_400_000)
+        assert meta["is_simple_current"] is False
+        assert meta["accum_formula_eligible"] is True
+
+    def test_reest_within_current_fy_is_complex(self):
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2020, 1, 1), cost=12_000_000, salvage=0, life=10, method="정액법",
+            disposal=None, reest_date=dt.date(2025, 7, 1), reest_life=5, fy_year=2025)
+        assert meta["is_simple_current"] is False
+
+    def test_units_of_production_uses_cost_as_basis(self):
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=1, method="생산량비례법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025)
+        assert meta["basis"] == 6_000_000
+        assert meta["life_months"] is None
+        assert meta["is_simple_current"] is True
+        assert meta["prior_fy_end_bv"] is None
+        # 전기말누적생산량을 안 줬으면 여전히 수식화 불가.
+        assert meta["accum_formula_eligible"] is False
+
+    def test_units_of_production_accum_eligible_when_prior_units_given(self):
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=1, method="생산량비례법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025, prior_period_units=100)
+        assert meta["accum_formula_eligible"] is True
+
+    def test_prior_fy_end_bv_freezes_at_disposal(self):
+        # 전기 이전에 처분된 자산은 전기말 장부가액이 처분 시점에서 멈춰야 한다
+        # (처분 이후에도 상각이 계속된 것처럼 계산하면 안 됨).
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2020, 1, 1), cost=6_000_000, salvage=0, life=5, method="정액법",
+            disposal=dt.date(2022, 6, 30), reest_date=None, reest_life=None, fy_year=2025)
+        # recalc_accumulated_dep의 손계산 사례(TestAccumulatedDepreciation)와 동일한 자산 —
+        # 누계상각액 3,000,000원 -> 전기말장부가액 = 6,000,000-3,000,000 = 3,000,000원.
+        assert meta["prior_fy_end_bv"] == 3_000_000
+
+    def test_reest_inside_suspension_window_book_value_is_correct(self):
+        # 재추정 시점이 상각중단 구간 "안"인 경계 케이스 — 새로 만들어지는 구간의
+        # 시작월 자체가 상각중단 구간 안에 있을 때도 전기말장부가액이 정확해야 한다
+        # (구간 시작월을 nominal_month_index로 변환하면 중단시작 직전월로 고정돼버려
+        # 이후 경과월수 계산이 한 달 밀리는 버그가 있었다 — 회귀 테스트).
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2021, 1, 1), cost=9_000_000, salvage=0, life=6, method="정액법",
+            disposal=None, reest_date=dt.date(2023, 6, 1), reest_life=5, fy_year=2025,
+            susp_start=dt.date(2023, 3, 1), susp_end=dt.date(2023, 9, 30))
+        accum_recalc = R.recalc_accumulated_dep(
+            acq=dt.date(2021, 1, 1), cost=9_000_000, salvage=0, life=6, method="정액법",
+            disposal=None, reest_date=dt.date(2023, 6, 1), reest_life=5, fy_year=2025,
+            susp_start=dt.date(2023, 3, 1), susp_end=dt.date(2023, 9, 30))
+        assert round(9_000_000 - meta["prior_fy_end_bv"]) == accum_recalc

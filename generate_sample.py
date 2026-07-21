@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sample_asset_ledger_v3.xlsx 생성 스크립트(1회성).
+sample_asset_ledger.xlsx 생성 스크립트(재현용 — 코드가 바뀌어 재계산값이 달라지면
+다시 실행해 정답값을 새로 채워 넣는 용도로 리포지토리에 남겨둔다).
 recalc.py의 recalc_asset을 그대로 호출해서 "정상"으로 분류될 행의 회사반영금액을
 재계산값과 동일하게 채우고(=일치), 일부 행만 의도적으로 틀리게 만들어 불일치를 만든다.
 데이터오류 행은 recalc_asset을 호출하지 않고 값만 채운다(어차피 검증단계에서 걸러짐).
@@ -19,7 +20,7 @@ FY_YEAR = 2025
 COLS = ["자산명", "자산분류(유형자산/무형자산)", "취득일", "취득원가", "잔존가치", "내용연수(년)",
         "상각방법(정액법/정률법)", "회사반영_당기감가상각비", "처분일", "내용연수재추정일",
         "재추정후내용연수(년)", "재추정후상각방법(정액법/정률법)", "총예정생산량", "당기실제생산량",
-        "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
+        "전기말누적생산량", "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
         "회사반영_전기말감가상각누계액"]
 
 rows = []
@@ -29,7 +30,7 @@ accum_mismatch_names = set()
 
 def add_normal(name, category, cost, salvage, life, method, acq,
                 disposal=None, reest_date=None, reest_life=None, reest_method=None,
-                total_units=None, period_units=None,
+                total_units=None, period_units=None, prior_period_units=None,
                 capex_date=None, capex_amount=None, susp_start=None, susp_end=None,
                 mismatch_offset=None, accum_mismatch_offset=None):
     dep, months, life_ended, note = R.recalc_asset(
@@ -57,18 +58,18 @@ def add_normal(name, category, cost, salvage, life, method, acq,
 
     rows.append([
         name, category, acq, cost, salvage, life, method, reported,
-        disposal, reest_date, reest_life, reest_method, total_units, period_units,
+        disposal, reest_date, reest_life, reest_method, total_units, period_units, prior_period_units,
         capex_date, capex_amount, susp_start, susp_end, accum_reported,
     ])
 
 
 def add_error(name, category, cost, salvage, life, method, acq, reported,
               disposal=None, reest_date=None, reest_life=None, reest_method=None,
-              total_units=None, period_units=None,
+              total_units=None, period_units=None, prior_period_units=None,
               capex_date=None, capex_amount=None, susp_start=None, susp_end=None):
     rows.append([
         name, category, acq, cost, salvage, life, method, reported,
-        disposal, reest_date, reest_life, reest_method, total_units, period_units,
+        disposal, reest_date, reest_life, reest_method, total_units, period_units, prior_period_units,
         capex_date, capex_amount, susp_start, susp_end, None,
     ])
 
@@ -101,13 +102,17 @@ for i, (acq, life) in enumerate(zip(acq_variety[:4], [5, 9, 12, 22]), start=1):
 # C. 기본자산(이벤트 없음) - 생산량비례법: 유형 4 + 무형 2 = 6
 # ---------------------------------------------------------------------------
 for i in range(1, 5):
+    # 유형01~03은 전기말누적생산량을 입력해 전기말/당기말 누계액 수식화를 시연하고,
+    # 유형04는 미입력 상태(기존처럼 값 없이 공란)로 남겨 하위호환도 함께 검증한다.
     add_normal(f"생산량비례법기본자산_유형{i:02d}", "유형자산", 20_000_000, 2_000_000, 1,
                "생산량비례법", dt.date(2022, 1, 1),
-               total_units=100_000, period_units=8_000 + i * 1_000)
+               total_units=100_000, period_units=8_000 + i * 1_000,
+               prior_period_units=(40_000 + i * 2_000) if i <= 3 else None)
 for i in range(1, 3):
     add_normal(f"생산량비례법기본자산_무형{i:02d}", "무형자산", 15_000_000, 0, 1,
                "생산량비례법", dt.date(2023, 1, 1),
-               total_units=50_000, period_units=6_000 + i * 500)
+               total_units=50_000, period_units=6_000 + i * 500,
+               prior_period_units=20_000 + i * 1_000)
 
 # ---------------------------------------------------------------------------
 # D. 처분만: 정액/정률 x 당기중/전기이전 x 유형/무형 대표 10건
@@ -334,7 +339,7 @@ add_error("오류_상각중단짝안맞음", "유형자산", 10_000_000, 0, 5, "
 # 저장
 # ---------------------------------------------------------------------------
 out_df = pd.DataFrame(rows, columns=COLS)
-out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_asset_ledger_v3.xlsx")
+out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_asset_ledger.xlsx")
 out_df.to_excel(out_path, index=False)
 print(f"생성 완료: {len(out_df)}건 -> {out_path}")
 print(f"의도적 당기상각비 불일치 자산({len(mismatch_names)}건): {sorted(mismatch_names)}")
