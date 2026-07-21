@@ -20,6 +20,7 @@ import sys
 from decimal import Decimal, ROUND_HALF_UP
 
 import pandas as pd
+import yaml
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -39,53 +40,24 @@ except ImportError:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# 기본값은 이 스크립트가 있는 폴더의 샘플 파일. 다른 회사 파일을 검증하려면
-# `python recalc.py --input 파일.xlsx --output 결과.xlsx`처럼 인자로 넘기면 된다
-# (아래 __main__ 블록 참고). 코드를 직접 고치지 않아도 되도록 하기 위함.
-IN_PATH = "sample_asset_ledger.xlsx"
-OUT_PATH = "recalc_result.xlsx"
-
-# 기준일: 이 날짜가 속한 회계연도(1/1~12/31)의 당기 감가상각비를 재계산한다.
-REF_DATE = dt.date(2025, 12, 31)
-FY_YEAR = REF_DATE.year
-
-# 중요성 기준 금액(=AMPT, Audit Misstatement Posting Threshold, 원): 회사반영 대비
-# 재계산 차이의 절대값이 이 금액 미만이면 "경미한 차이", 이상이면 "유의한 차이"로
-# 구분한다(재계산결과 시트의 실제 판정 로직에 쓰이는 값은 이 상수뿐이다).
-MATERIALITY_THRESHOLD = 1_000_000
-
-# 아래 두 값은 판정 로직에는 쓰이지 않고, 기준정보 시트에 참고용으로만 표시된다
-# (전체 재무제표 수준 중요성과 수행중요성 — 감사 실무에서 통상 함께 보는 지표).
-OVERALL_MATERIALITY = 50_000_000  # 중요성
-PERFORMANCE_MATERIALITY = 10_000_000  # 수행중요성(PM)
-
-# "유의한 차이" 자산의 AI 추정원인 코멘트 생성에 사용할 모델.
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
-
 # 재계산결과 시트의 상각률/재계산 수치가 참조하는 엑셀 수식용 참조 시트 이름.
+# (도구 내부 구조에 묶여 있는 값이라 config.yaml로 빼지 않는다 — 이름을 바꾸려면
+# _inject_recalc_formulas/_write_info_sheet의 수식 문자열도 같이 고쳐야 한다.)
 RATE_TABLE_SHEET = "상각률표(별표4)"
 INFO_SHEET = "기준정보"
 
-# 다기간(연도별) 비교 대상 회계연도 목록. 기본값처럼 [FY_YEAR] 하나만 두면
-# 기존과 완전히 동일하게 단일 연도만 계산한다. 여러 연도 추이를 보려면
-# 예: COMPARISON_YEARS = [2023, 2024, 2025]
-COMPARISON_YEARS = [FY_YEAR]
-
-# 다기간 비교에서 전년대비 이 비율(%) 이상 증감하면 "경고"로 표시한다.
-YOY_ANOMALY_THRESHOLD_PCT = 20.0
-
 # ---------------------------------------------------------------------------
-# 컬럼명 매핑
-# 회사마다 고정자산대장의 컬럼명이 다를 수 있으므로, 실제 파일의 컬럼명을
-# 여기서만 바꿔 지정하면 스크립트 본문은 수정할 필요가 없다.
-# 예: 회사 파일에서 취득원가 컬럼이 "취득가액"이라는 이름이면
-#     "취득원가": "취득가액" 으로 바꾸면 된다.
-#
-# 처분일 / 내용연수재추정일 / 재추정후내용연수 는 선택 항목이다.
-# 회사 파일에 해당 컬럼 자체가 없으면(매핑된 이름이 파일에 없으면) 모든 자산에
-# 처분/재추정이 없는 것으로 간주하고 계속 진행한다.
+# 설정 파일(config.yaml) 로딩
+# 회사·감사 건마다 달라질 수 있는 값(입출력 경로, 기준일, 중요성 기준액,
+# 다기간 비교 연도, AI 모델, 컬럼명 매핑)은 코드가 아니라 config.yaml에서
+# 읽어온다. 설정 파일이 없거나 특정 키가 빠져 있어도 에러 없이 아래 기본값으로
+# 자연스럽게 대체된다 — "설정 파일은 있으면 좋고 없어도 동작하는" 방식.
 # ---------------------------------------------------------------------------
-COLUMN_MAP = {
+DEFAULT_CONFIG_PATH = "config.yaml"
+
+# COLUMN_MAP의 코드 내장 기본값. config.yaml의 column_map은 이 위에 부분적으로
+# 덮어씌워진다(병합) — config에서 빠뜨린 항목은 여기 기본값이 그대로 쓰인다.
+_DEFAULT_COLUMN_MAP = {
     "자산명": "자산명",
     "자산분류": "자산분류(유형자산/무형자산)",
     "취득일": "취득일",
@@ -107,6 +79,129 @@ COLUMN_MAP = {
     "상각중단종료일": "상각중단종료일",
     "회사반영누계상각액": "회사반영_전기말감가상각누계액",
 }
+
+
+def load_config(path: str) -> dict:
+    """설정 파일(YAML)을 읽어 dict로 반환한다. 파일이 없거나, 비어 있거나,
+    형식이 잘못돼 파싱에 실패하면 안내 메시지만 출력하고 빈 dict를 반환한다
+    (호출부는 이 dict를 .get(key, 기존기본값) 형태로만 쓰므로, 빈 dict는
+    "설정 파일 없음 = 코드 내장 기본값 전부 사용"과 동일하게 자연스럽게
+    동작한다 — 이 함수가 예외를 던져 프로그램을 죽이는 일은 없다).
+    """
+    if not path or not os.path.exists(path):
+        if path and path != DEFAULT_CONFIG_PATH:
+            print(f"[!!] 설정 파일을 찾을 수 없어 내장 기본값을 사용합니다: {path}")
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[!!] 설정 파일을 읽는 중 오류가 발생해 내장 기본값을 사용합니다: {path} ({e})")
+        return {}
+
+
+def _cfg_get(config: dict, key: str, default, caster=None):
+    """config[key]가 없거나 None이면 default를, 있으면 caster(config[key])를
+    반환한다. caster 변환이 실패하면(값 타입이 잘못된 경우 등) 안내를 출력하고
+    default로 폴백한다 — 설정 파일에 오탈자/잘못된 값이 있어도 죽지 않는다.
+    """
+    value = config.get(key)
+    if value is None:
+        return default
+    if caster is None:
+        return value
+    try:
+        return caster(value)
+    except (TypeError, ValueError):
+        print(f"[!!] 설정값 '{key}'가 올바르지 않아 기본값을 사용합니다: {value!r}")
+        return default
+
+
+def _parse_ref_date(value) -> dt.date:
+    """ref_date 설정값을 date로 정규화한다. PyYAML은 따옴표 없는
+    2025-12-31 같은 값을 자동으로 datetime.date로 파싱하고, 따옴표를 붙이면
+    문자열로 남긴다 — 사용자가 어느 쪽으로 적어도 정상 동작하도록 두 경우와
+    datetime.datetime(자정 타임스탬프로 파싱되는 경우)까지 모두 받아들인다.
+    """
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    return dt.date.fromisoformat(str(value))
+
+
+def resolve_settings(config: dict) -> dict:
+    """config.yaml에서 읽은 dict(없으면 빈 dict)를 코드 내장 기본값과 합쳐,
+    실제로 사용할 설정값 dict를 만든다. 모든 항목이 개별적으로 폴백되므로
+    config.yaml에 일부 키만 있어도(또는 아예 없어도) 안전하게 동작한다.
+    """
+    ref_date = _cfg_get(config, "ref_date", dt.date(2025, 12, 31), _parse_ref_date)
+    fy_year = ref_date.year
+    cfg_column_map = config.get("column_map")
+    column_map = {
+        **_DEFAULT_COLUMN_MAP,
+        **(cfg_column_map if isinstance(cfg_column_map, dict) else {}),
+    }
+    return {
+        "IN_PATH": _cfg_get(config, "input_path", "sample_asset_ledger.xlsx", str),
+        "OUT_PATH": _cfg_get(config, "output_path", "recalc_result.xlsx", str),
+        "REF_DATE": ref_date,
+        "FY_YEAR": fy_year,
+        "MATERIALITY_THRESHOLD": _cfg_get(config, "materiality_threshold", 1_000_000, int),
+        "OVERALL_MATERIALITY": _cfg_get(config, "overall_materiality", 50_000_000, int),
+        "PERFORMANCE_MATERIALITY": _cfg_get(config, "performance_materiality", 10_000_000, int),
+        "ANTHROPIC_MODEL": _cfg_get(config, "anthropic_model", "claude-sonnet-4-6", str),
+        "COMPARISON_YEARS": _cfg_get(config, "comparison_years", [fy_year], list),
+        "YOY_ANOMALY_THRESHOLD_PCT": _cfg_get(config, "yoy_anomaly_threshold_pct", 20.0, float),
+        "COLUMN_MAP": column_map,
+    }
+
+
+_settings = resolve_settings(load_config(DEFAULT_CONFIG_PATH))
+
+# 입출력 파일 경로. `python recalc.py --input 파일.xlsx --output 결과.xlsx`처럼
+# 인자로 넘기면 config.yaml의 값보다 우선한다(아래 __main__ 블록 참고).
+IN_PATH = _settings["IN_PATH"]
+OUT_PATH = _settings["OUT_PATH"]
+
+# 기준일: 이 날짜가 속한 회계연도(1/1~12/31)의 당기 감가상각비를 재계산한다.
+REF_DATE = _settings["REF_DATE"]
+FY_YEAR = _settings["FY_YEAR"]
+
+# 중요성 기준 금액(=AMPT, Audit Misstatement Posting Threshold, 원): 회사반영 대비
+# 재계산 차이의 절대값이 이 금액 미만이면 "경미한 차이", 이상이면 "유의한 차이"로
+# 구분한다(재계산결과 시트의 실제 판정 로직에 쓰이는 값은 이 상수뿐이다).
+MATERIALITY_THRESHOLD = _settings["MATERIALITY_THRESHOLD"]
+
+# 아래 두 값은 판정 로직에는 쓰이지 않고, 기준정보 시트에 참고용으로만 표시된다
+# (전체 재무제표 수준 중요성과 수행중요성 — 감사 실무에서 통상 함께 보는 지표).
+OVERALL_MATERIALITY = _settings["OVERALL_MATERIALITY"]  # 중요성
+PERFORMANCE_MATERIALITY = _settings["PERFORMANCE_MATERIALITY"]  # 수행중요성(PM)
+
+# "유의한 차이" 자산의 AI 추정원인 코멘트 생성에 사용할 모델.
+ANTHROPIC_MODEL = _settings["ANTHROPIC_MODEL"]
+
+# 다기간(연도별) 비교 대상 회계연도 목록. 기본값처럼 [FY_YEAR] 하나만 두면
+# 기존과 완전히 동일하게 단일 연도만 계산한다. 여러 연도 추이를 보려면
+# config.yaml의 comparison_years에 예: [2023, 2024, 2025] 처럼 지정한다.
+COMPARISON_YEARS = _settings["COMPARISON_YEARS"]
+
+# 다기간 비교에서 전년대비 이 비율(%) 이상 증감하면 "경고"로 표시한다.
+YOY_ANOMALY_THRESHOLD_PCT = _settings["YOY_ANOMALY_THRESHOLD_PCT"]
+
+# ---------------------------------------------------------------------------
+# 컬럼명 매핑
+# 회사마다 고정자산대장의 컬럼명이 다를 수 있으므로, config.yaml의 column_map만
+# 바꿔 지정하면 스크립트 본문은 수정할 필요가 없다.
+# 예: 회사 파일에서 취득원가 컬럼이 "취득가액"이라는 이름이면
+#     column_map의 "취득원가": "취득가액" 으로 바꾸면 된다.
+#
+# 처분일 / 내용연수재추정일 / 재추정후내용연수 는 선택 항목이다.
+# 회사 파일에 해당 컬럼 자체가 없으면(매핑된 이름이 파일에 없으면) 모든 자산에
+# 처분/재추정이 없는 것으로 간주하고 계속 진행한다.
+# ---------------------------------------------------------------------------
+COLUMN_MAP = _settings["COLUMN_MAP"]
 
 REQUIRED_KEYS = [
     "자산명", "자산분류", "취득일", "취득원가", "잔존가치",
@@ -1471,7 +1566,7 @@ def main():
 
         diff = recalced - reported
         match = "일치" if diff == 0 else "불일치"
-        materiality = classify_materiality(diff)
+        materiality = classify_materiality(diff, MATERIALITY_THRESHOLD)
 
         # 규칙 기반 분류는 비용이 들지 않으므로 "불일치"인 모든 자산에 시도하고,
         # 규칙으로 설명이 안 되는 애매한 경우에 한해서만(그리고 유의한 차이일 때만)
@@ -1549,7 +1644,8 @@ def main():
     trend_df = None
     pivot_df = None
     if len(COMPARISON_YEARS) > 1:
-        trend_df = detect_yoy_anomalies(build_multi_year_trend_df(df, cols, COMPARISON_YEARS))
+        trend_df = detect_yoy_anomalies(build_multi_year_trend_df(df, cols, COMPARISON_YEARS),
+                                         threshold_pct=YOY_ANOMALY_THRESHOLD_PCT)
         pivot_df = trend_df.pivot_table(
             index=["자산ID", "자산명", "자산분류", "상각방법"],
             columns="회계연도", values="재계산_당기감가상각비",
@@ -1973,11 +2069,33 @@ def _format_workbook(writer, result_df, diff_df, material_diff_df, error_df, cat
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="고정자산 감가상각비 재계산 검증 도구")
-    parser.add_argument("--input", "-i", default=IN_PATH,
-                         help="입력 고정자산대장 엑셀 경로 (기본값: 현재 폴더의 sample_asset_ledger.xlsx)")
-    parser.add_argument("--output", "-o", default=OUT_PATH,
-                         help="결과 엑셀 저장 경로 (기본값: 현재 폴더의 recalc_result.xlsx)")
+    parser.add_argument("--config", "-c", default=DEFAULT_CONFIG_PATH,
+                         help=f"설정 파일 경로 (기본값: {DEFAULT_CONFIG_PATH})")
+    parser.add_argument("--input", "-i", default=None,
+                         help="입력 고정자산대장 엑셀 경로 (기본값: 설정 파일의 input_path)")
+    parser.add_argument("--output", "-o", default=None,
+                         help="결과 엑셀 저장 경로 (기본값: 설정 파일의 output_path)")
     args = parser.parse_args()
-    IN_PATH = args.input
-    OUT_PATH = args.output
+
+    # --config로 지정한 설정 파일을 다시 읽어 모든 설정을 갱신한다(기본값과 같은
+    # 경로라도 한 번 더 읽을 뿐이라 멱등하게 안전하다 — 특별 분기 불필요).
+    settings = resolve_settings(load_config(args.config))
+    IN_PATH = settings["IN_PATH"]
+    OUT_PATH = settings["OUT_PATH"]
+    REF_DATE = settings["REF_DATE"]
+    FY_YEAR = settings["FY_YEAR"]
+    MATERIALITY_THRESHOLD = settings["MATERIALITY_THRESHOLD"]
+    OVERALL_MATERIALITY = settings["OVERALL_MATERIALITY"]
+    PERFORMANCE_MATERIALITY = settings["PERFORMANCE_MATERIALITY"]
+    ANTHROPIC_MODEL = settings["ANTHROPIC_MODEL"]
+    COMPARISON_YEARS = settings["COMPARISON_YEARS"]
+    YOY_ANOMALY_THRESHOLD_PCT = settings["YOY_ANOMALY_THRESHOLD_PCT"]
+    COLUMN_MAP = settings["COLUMN_MAP"]
+
+    # --input/--output은 설정 파일보다 항상 우선한다.
+    if args.input:
+        IN_PATH = args.input
+    if args.output:
+        OUT_PATH = args.output
+
     main()

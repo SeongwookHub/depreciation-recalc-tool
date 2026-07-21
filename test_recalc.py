@@ -1311,3 +1311,88 @@ class TestResolveColumns:
             assert "장부가액" in str(e)  # 추천은 메시지에만 나타나고
         # resolve_columns가 정상 반환되는 경로 자체가 없으므로(예외로 중단),
         # 자동 반영되지 않았다는 것 자체가 위 KeyError 발생으로 이미 증명된다.
+
+
+# ---------------------------------------------------------------------------
+# 25) config.yaml 설정 로딩 (load_config / _cfg_get / _parse_ref_date / resolve_settings)
+# ---------------------------------------------------------------------------
+class TestLoadConfig:
+    def test_missing_file_returns_empty_dict(self, tmp_path):
+        assert R.load_config(str(tmp_path / "없는파일.yaml")) == {}
+
+    def test_malformed_yaml_returns_empty_dict_without_raising(self, tmp_path):
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("key: : :\n  bad indent\n -x", encoding="utf-8")
+        assert R.load_config(str(bad)) == {}
+
+    def test_non_dict_top_level_returns_empty_dict(self, tmp_path):
+        # YAML 최상위가 리스트/스칼라인 경우도 dict가 아니므로 빈 dict로 취급한다.
+        listy = tmp_path / "listy.yaml"
+        listy.write_text("- a\n- b\n", encoding="utf-8")
+        assert R.load_config(str(listy)) == {}
+
+    def test_valid_yaml_returns_parsed_dict(self, tmp_path):
+        good = tmp_path / "good.yaml"
+        good.write_text("materiality_threshold: 500000\ncomparison_years: [2023, 2024]\n", encoding="utf-8")
+        config = R.load_config(str(good))
+        assert config == {"materiality_threshold": 500000, "comparison_years": [2023, 2024]}
+
+
+class TestCfgGet:
+    def test_missing_key_returns_default(self):
+        assert R._cfg_get({}, "materiality_threshold", 1_000_000) == 1_000_000
+
+    def test_none_value_returns_default(self):
+        assert R._cfg_get({"materiality_threshold": None}, "materiality_threshold", 1_000_000) == 1_000_000
+
+    def test_caster_applied_on_present_value(self):
+        assert R._cfg_get({"yoy_anomaly_threshold_pct": "20"}, "yoy_anomaly_threshold_pct", 20.0, float) == 20.0
+
+    def test_caster_failure_falls_back_to_default(self):
+        # int("가나다")는 ValueError를 던진다 — 기본값으로 조용히 폴백해야 한다.
+        assert R._cfg_get({"materiality_threshold": "가나다"}, "materiality_threshold", 1_000_000, int) == 1_000_000
+
+
+class TestParseRefDate:
+    def test_quoted_string(self):
+        assert R._parse_ref_date("2025-12-31") == dt.date(2025, 12, 31)
+
+    def test_yaml_auto_parsed_date_object(self):
+        # 따옴표 없는 ref_date: 2025-12-31 는 PyYAML이 datetime.date로 자동 파싱한다.
+        assert R._parse_ref_date(dt.date(2025, 12, 31)) == dt.date(2025, 12, 31)
+
+    def test_datetime_object(self):
+        assert R._parse_ref_date(dt.datetime(2025, 12, 31, 0, 0)) == dt.date(2025, 12, 31)
+
+
+class TestResolveSettings:
+    def test_empty_config_matches_builtin_defaults(self):
+        settings = R.resolve_settings({})
+        assert settings["IN_PATH"] == "sample_asset_ledger.xlsx"
+        assert settings["OUT_PATH"] == "recalc_result.xlsx"
+        assert settings["REF_DATE"] == dt.date(2025, 12, 31)
+        assert settings["FY_YEAR"] == 2025
+        assert settings["MATERIALITY_THRESHOLD"] == 1_000_000
+        assert settings["OVERALL_MATERIALITY"] == 50_000_000
+        assert settings["PERFORMANCE_MATERIALITY"] == 10_000_000
+        assert settings["ANTHROPIC_MODEL"] == "claude-sonnet-4-6"
+        assert settings["COMPARISON_YEARS"] == [2025]
+        assert settings["YOY_ANOMALY_THRESHOLD_PCT"] == 20.0
+        assert settings["COLUMN_MAP"] == R._DEFAULT_COLUMN_MAP
+
+    def test_partial_column_map_merges_with_defaults(self):
+        settings = R.resolve_settings({"column_map": {"취득원가": "취득가액"}})
+        assert settings["COLUMN_MAP"]["취득원가"] == "취득가액"
+        # 명시하지 않은 나머지 19개 키는 기본값이 그대로 유지되어야 한다.
+        assert settings["COLUMN_MAP"]["자산명"] == R._DEFAULT_COLUMN_MAP["자산명"]
+        assert len(settings["COLUMN_MAP"]) == len(R._DEFAULT_COLUMN_MAP)
+
+    def test_non_dict_column_map_falls_back_to_defaults(self):
+        settings = R.resolve_settings({"column_map": "이상한값"})
+        assert settings["COLUMN_MAP"] == R._DEFAULT_COLUMN_MAP
+
+    def test_comparison_years_overridden_changes_fy_year_independent_ref_date(self):
+        settings = R.resolve_settings({"ref_date": "2023-06-30", "comparison_years": [2021, 2022, 2023]})
+        assert settings["REF_DATE"] == dt.date(2023, 6, 30)
+        assert settings["FY_YEAR"] == 2023
+        assert settings["COMPARISON_YEARS"] == [2021, 2022, 2023]

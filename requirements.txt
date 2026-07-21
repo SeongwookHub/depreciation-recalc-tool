@@ -2,5 +2,6 @@ pandas
 openpyxl
 anthropic
 python-dotenv
+pyyaml
 pytest
 ruff
