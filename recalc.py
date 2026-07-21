@@ -299,7 +299,13 @@ STRAIGHT_LINE_RATE_TABLE = {
 }
 
 
-def classify_materiality(diff: int, threshold: int = MATERIALITY_THRESHOLD) -> str:
+def classify_materiality(diff: int, threshold: Optional[int] = None) -> str:
+    # threshold 기본값을 MATERIALITY_THRESHOLD로 직접 두면 이 함수가 "정의되는
+    # 시점"의 값으로 영구 고정된다(파이썬 기본 인자 바인딩 특성) — 이후 --config로
+    # MATERIALITY_THRESHOLD를 다시 읽어도 여기 기본값은 갱신되지 않는다. None을
+    # 기본값으로 두고 호출 시점에 전역을 조회해야 항상 최신 값을 쓴다.
+    if threshold is None:
+        threshold = MATERIALITY_THRESHOLD
     return "유의한 차이" if abs(diff) >= threshold else "경미한 차이"
 
 
@@ -324,7 +330,8 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
                            capex_date=None, capex_amount: float = None,
                            susp_start=None, susp_end=None,
                            accum_reported: float = None,
-                           prior_period_units: float = None) -> list:
+                           prior_period_units: float = None,
+                           acq=None, disposal=None, reest_date=None) -> list:
     """
     재계산에 들어가기 전 취득원가/잔존가치/내용연수가 계산 가능한 값인지 검증한다.
     문제가 있으면 오류 사유 문자열 리스트를, 문제가 없으면 빈 리스트를 반환한다.
@@ -336,6 +343,10 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
 
     자본적지출/상각중단/재추정후상각방법은 자산에 이벤트가 있을 때만 값이 채워지므로
     (선택 컬럼), 각각 "짝이 맞는지"와 "값 자체가 유효한지"만 검증한다.
+
+    acq(취득일)는 처분일/재추정일/상각중단시작일·종료일이 취득일보다 앞서는(=취득도
+    하기 전에 이벤트가 발생한) 순서 오류를 잡는 데만 쓰인다 — acq를 넘기지 않으면
+    (기본값 None) 비교 기준이 없으므로 이 순서 검증은 조용히 건너뛴다.
     """
     errors = []
     if method is not None and method not in KNOWN_METHODS:
@@ -365,6 +376,14 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
         errors.append(f"회사반영_전기말감가상각누계액 오류(값={accum_reported:,.0f}원, 0 이상이어야 함)")
     if prior_period_units is not None and prior_period_units < 0:
         errors.append(f"전기말누적생산량 오류(값={prior_period_units:,.0f}, 0 이상이어야 함)")
+    if disposal is not None and acq is not None and disposal < acq:
+        errors.append(f"처분일 오류(처분일={disposal}이 취득일={acq}보다 빠름)")
+    if reest_date is not None and acq is not None and reest_date < acq:
+        errors.append(f"내용연수재추정일 오류(재추정일={reest_date}이 취득일={acq}보다 빠름)")
+    if susp_start is not None and acq is not None and susp_start < acq:
+        errors.append(f"상각중단시작일 오류(상각중단시작일={susp_start}이 취득일={acq}보다 빠름)")
+    if susp_end is not None and acq is not None and susp_end < acq:
+        errors.append(f"상각중단종료일 오류(상각중단종료일={susp_end}이 취득일={acq}보다 빠름)")
     return errors
 
 
@@ -479,13 +498,18 @@ def elapsed_months_to_ref(acq: dt.date, ref: dt.date) -> int:
     return month_index(ref.year, ref.month) - month_index(acq.year, acq.month) + 1
 
 
-def fy_ref_date(year: int) -> dt.date:
+def fy_ref_date(year: int, current_fy_year: int) -> dt.date:
     """
-    다기간 비교에서 각 회계연도의 기준일을 반환한다. REF_DATE의 연도와 같으면
-    REF_DATE를 그대로 쓰고(12/31이 아닌 기준일 설정도 존중), 그 외 연도는
-    해당 연도의 12/31을 기준일로 본다.
+    다기간 비교에서 각 회계연도의 기준일을 반환한다. current_fy_year(호출부가 실제로
+    처리 중인 당기 회계연도)와 같으면 REF_DATE를 그대로 쓰고(12/31이 아닌 기준일
+    설정도 존중), 그 외 연도는 해당 연도의 12/31을 기준일로 본다.
+
+    전역 FY_YEAR를 몰래 참조하지 않고 명시적으로 받는 이유: recalc_accumulated_dep가
+    자기 fy_year 파라미터가 아니라 전역 FY_YEAR로 "당기가 몇 년도인지"를 판단하면,
+    호출부가 전역과 다른 연도로 이 함수를 호출하는 경우(현재는 없지만 향후 가능)
+    조용히 잘못된 기준일을 반환하게 된다.
     """
-    return REF_DATE if year == FY_YEAR else dt.date(year, 12, 31)
+    return REF_DATE if year == current_fy_year else dt.date(year, 12, 31)
 
 
 # ---------------------------------------------------------------------------
@@ -1006,7 +1030,7 @@ def recalc_accumulated_dep(acq, cost, salvage, life, method, disposal, reest_dat
     for y in range(acq.year, fy_year):
         dep, _, _, _ = recalc_asset(
             acq, cost, salvage, life, method, disposal, reest_date, reest_life,
-            fy_ref_date(y), y, total_units=total_units, period_units=period_units,
+            fy_ref_date(y, fy_year), y, total_units=total_units, period_units=period_units,
             reest_method=reest_method, capex_date=capex_date, capex_amount=capex_amount,
             susp_start=susp_start, susp_end=susp_end)
         total += dep
@@ -1365,11 +1389,14 @@ def parse_asset_row(r, cols) -> dict:
     )
 
 
-def build_multi_year_trend_df(df: pd.DataFrame, cols: dict, years: list) -> pd.DataFrame:
+def build_multi_year_trend_df(df: pd.DataFrame, cols: dict, years: list, current_fy_year: int) -> pd.DataFrame:
     """
     자산별로 years에 지정된 각 회계연도의 재계산 상각비를 구해 long format으로 쌓는다.
     자산명이 중복될 수 있으므로 그룹핑용 키는 자산명이 아니라 원본 행 순번(자산ID)을 쓴다.
     데이터 오류(계산 불가능한 값)로 걸러지는 자산은 단일연도 처리와 동일하게 제외한다.
+
+    current_fy_year: years 중 어느 연도가 "당기"인지(기준일 REF_DATE를 그대로 쓸
+    연도) — fy_ref_date에 그대로 전달한다.
     """
     rows = []
     for asset_id, (_, r) in enumerate(df.iterrows()):
@@ -1377,13 +1404,14 @@ def build_multi_year_trend_df(df: pd.DataFrame, cols: dict, years: list) -> pd.D
         errors = validate_asset_inputs(
             p["cost"], p["salvage"], p["life"], method=p["method"], total_units=p["total_units"],
             reest_method=p["reest_method"], capex_date=p["capex_date"], capex_amount=p["capex_amount"],
-            susp_start=p["susp_start"], susp_end=p["susp_end"])
+            susp_start=p["susp_start"], susp_end=p["susp_end"],
+            acq=p["acq"], disposal=p["disposal"], reest_date=p["reest_date"])
         if errors:
             continue
         for y in years:
             recalced, months, life_ended, note = recalc_asset(
                 p["acq"], p["cost"], p["salvage"], p["life"], p["method"], p["disposal"],
-                p["reest_date"], p["reest_life"], fy_ref_date(y), y,
+                p["reest_date"], p["reest_life"], fy_ref_date(y, current_fy_year), y,
                 total_units=p["total_units"], period_units=p["period_units"],
                 reest_method=p["reest_method"], capex_date=p["capex_date"], capex_amount=p["capex_amount"],
                 susp_start=p["susp_start"], susp_end=p["susp_end"])
@@ -1395,11 +1423,15 @@ def build_multi_year_trend_df(df: pd.DataFrame, cols: dict, years: list) -> pd.D
     return pd.DataFrame(rows)
 
 
-def detect_yoy_anomalies(trend_df: pd.DataFrame, threshold_pct: float = YOY_ANOMALY_THRESHOLD_PCT) -> pd.DataFrame:
+def detect_yoy_anomalies(trend_df: pd.DataFrame, threshold_pct: Optional[float] = None) -> pd.DataFrame:
     """
     자산ID별로 회계연도 순 정렬 후 전년대비 증감률을 계산해 이상탐지 컬럼을 추가한다.
     전년도 상각비가 0원이면 %증감이 무의미하므로(0으로 나누기) '신규발생'/'-'로 표기한다.
     """
+    # classify_materiality와 동일한 이유로 None 기본값 + 호출 시점 전역 조회를 쓴다
+    # (threshold_pct=YOY_ANOMALY_THRESHOLD_PCT로 직접 두면 정의 시점 값에 고정됨).
+    if threshold_pct is None:
+        threshold_pct = YOY_ANOMALY_THRESHOLD_PCT
     df = trend_df.sort_values(["자산ID", "회계연도"]).reset_index(drop=True).copy()
     prev = df.groupby("자산ID")["재계산_당기감가상각비"].shift(1)
     pct = (df["재계산_당기감가상각비"] - prev) / prev.replace(0, float("nan")) * 100
@@ -1447,7 +1479,8 @@ def main():
             cost, salvage, life, method=method, total_units=total_units,
             reest_method=reest_method, capex_date=capex_date, capex_amount=capex_amount,
             susp_start=susp_start, susp_end=susp_end, accum_reported=accum_reported,
-            prior_period_units=prior_period_units)
+            prior_period_units=prior_period_units,
+            acq=acq, disposal=disposal, reest_date=reest_date)
         if validation_errors:
             error_rows.append({
                 "자산명": p["자산명"],
@@ -1627,7 +1660,7 @@ def main():
     trend_df = None
     pivot_df = None
     if len(COMPARISON_YEARS) > 1:
-        trend_df = detect_yoy_anomalies(build_multi_year_trend_df(df, cols, COMPARISON_YEARS),
+        trend_df = detect_yoy_anomalies(build_multi_year_trend_df(df, cols, COMPARISON_YEARS, FY_YEAR),
                                          threshold_pct=YOY_ANOMALY_THRESHOLD_PCT)
         pivot_df = trend_df.pivot_table(
             index=["자산ID", "자산명", "자산분류", "상각방법"],

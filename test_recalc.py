@@ -254,6 +254,15 @@ class TestMateriality:
         assert R.classify_materiality(300_000, threshold=500_000) == "경미한 차이"
         assert R.classify_materiality(500_000, threshold=500_000) == "유의한 차이"
 
+    def test_omitted_threshold_follows_monkeypatched_global_not_stale_default(self, monkeypatch):
+        # 회귀 테스트: threshold 기본값이 함수 정의 시점에 고정돼 있었다면(과거 버그),
+        # 여기서 MATERIALITY_THRESHOLD를 아무리 바꿔도 인자를 생략한 호출은 예전 값
+        # (1,000,000원)을 계속 썼을 것이다. None 기본값 + 호출 시점 조회로 고친 뒤에는
+        # monkeypatch로 바꾼 값이 인자 생략 호출에도 즉시 반영돼야 한다.
+        monkeypatch.setattr(R, "MATERIALITY_THRESHOLD", 500_000)
+        assert R.classify_materiality(600_000) == "유의한 차이"  # 새 임계값(50만원) 기준 유의함
+        assert R.classify_materiality(400_000) == "경미한 차이"  # 새 임계값 미만
+
 
 # ---------------------------------------------------------------------------
 # 8) 입력값 검증 (validate_asset_inputs) - 계산 불가능한 값은 "데이터 오류"로 분리
@@ -286,6 +295,51 @@ class TestValidateAssetInputs:
 
     def test_valid_inputs_return_no_errors(self):
         assert R.validate_asset_inputs(cost=10_000_000, salvage=1_000_000, life=5) == []
+
+    def test_disposal_before_acquisition_is_invalid(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5,
+            acq=dt.date(2022, 1, 1), disposal=dt.date(2021, 12, 31))
+        assert any("처분일" in e for e in errors)
+
+    def test_reest_date_before_acquisition_is_invalid(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5,
+            acq=dt.date(2022, 1, 1), reest_date=dt.date(2021, 12, 31))
+        assert any("내용연수재추정일" in e for e in errors)
+
+    def test_suspension_start_before_acquisition_is_invalid(self):
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, acq=dt.date(2022, 1, 1),
+            susp_start=dt.date(2021, 6, 1), susp_end=dt.date(2022, 6, 1))
+        assert any("상각중단시작일" in e for e in errors)
+
+    def test_suspension_end_before_acquisition_is_invalid(self):
+        # susp_end < susp_start(기존 "상각중단기간 오류")와는 다른 케이스 — 시작/종료
+        # 순서 자체는 정상이지만 기간 전체가 취득일보다 앞서는 경우. susp_end >=
+        # susp_start가 항상 보장되므로 susp_start만 취득일 이전이고 susp_end는
+        # 취득일 이후인 조합은 나올 수 없다 — 그래서 이 케이스는 두 오류 메시지가
+        # 함께 뜨는 게 정상이다.
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, acq=dt.date(2022, 6, 1),
+            susp_start=dt.date(2022, 1, 1), susp_end=dt.date(2022, 3, 1))
+        assert any("상각중단시작일" in e for e in errors)
+        assert any("상각중단종료일" in e for e in errors)
+
+    def test_dates_on_or_after_acquisition_are_valid(self):
+        # 취득일과 같은 날(경계값 포함) 또는 그 이후면 정상 — 순서 검증에 걸리면 안 된다.
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, acq=dt.date(2022, 1, 1),
+            disposal=dt.date(2022, 1, 1), reest_date=dt.date(2023, 1, 1),
+            susp_start=dt.date(2022, 6, 1), susp_end=dt.date(2022, 12, 31))
+        assert errors == []
+
+    def test_date_order_checks_skipped_when_acq_not_provided(self):
+        # acq를 안 넘기면(기본값 None) 비교 기준이 없으므로 순서 검증 자체를
+        # 건너뛴다 — 기존 30여 개 호출부가 acq 없이 부르던 것과 하위 호환된다.
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, disposal=dt.date(1900, 1, 1))
+        assert errors == []
 
 
 # ---------------------------------------------------------------------------
@@ -480,10 +534,16 @@ def _make_cols(df):
 
 class TestFyRefDate:
     def test_current_fy_year_uses_ref_date(self):
-        assert R.fy_ref_date(R.FY_YEAR) == R.REF_DATE
+        assert R.fy_ref_date(R.FY_YEAR, R.FY_YEAR) == R.REF_DATE
 
     def test_other_year_uses_dec_31(self):
-        assert R.fy_ref_date(2023) == dt.date(2023, 12, 31)
+        assert R.fy_ref_date(2023, R.FY_YEAR) == dt.date(2023, 12, 31)
+
+    def test_current_fy_year_param_not_global_fy_year(self):
+        # 회귀 테스트: current_fy_year는 전역 FY_YEAR가 아니라 인자로 판단해야 한다.
+        # 전역 FY_YEAR와 다른 값을 "당기"로 지정해도 그 연도는 REF_DATE를 그대로 써야 한다.
+        assert R.fy_ref_date(2023, current_fy_year=2023) == R.REF_DATE
+        assert R.fy_ref_date(R.FY_YEAR, current_fy_year=2023) == dt.date(R.FY_YEAR, 12, 31)
 
 
 class TestMultiYearTrend:
@@ -508,7 +568,7 @@ class TestMultiYearTrend:
     def test_matches_recalc_asset_per_year(self):
         df = self._sample_df()
         cols = _make_cols(df)
-        trend_df = R.build_multi_year_trend_df(df, cols, [2023, 2024, 2025])
+        trend_df = R.build_multi_year_trend_df(df, cols, [2023, 2024, 2025], R.FY_YEAR)
 
         asset_a = trend_df[trend_df["자산명"] == "본사건물"].set_index("회계연도")
         assert asset_a.loc[2023, "재계산_당기감가상각비"] == 2_400_000
@@ -518,7 +578,7 @@ class TestMultiYearTrend:
     def test_duplicate_names_kept_separate_by_asset_id(self):
         df = self._sample_df()
         cols = _make_cols(df)
-        trend_df = R.build_multi_year_trend_df(df, cols, [2023, 2024, 2025])
+        trend_df = R.build_multi_year_trend_df(df, cols, [2023, 2024, 2025], R.FY_YEAR)
 
         cha_rows = trend_df[trend_df["자산명"] == "차량"]
         assert cha_rows["자산ID"].nunique() == 2  # 이름은 같아도 별개 자산으로 유지
@@ -537,7 +597,7 @@ class TestMultiYearTrend:
     def test_detect_yoy_anomalies_flags(self):
         df = self._sample_df()
         cols = _make_cols(df)
-        trend_df = R.build_multi_year_trend_df(df, cols, [2023, 2024, 2025])
+        trend_df = R.build_multi_year_trend_df(df, cols, [2023, 2024, 2025], R.FY_YEAR)
         flagged = R.detect_yoy_anomalies(trend_df, threshold_pct=20.0)
 
         # 자산A: 매년 동일 금액 → 첫 연도는 "-"(비교대상 없음), 이후는 변동 없어 "-"
@@ -556,6 +616,24 @@ class TestMultiYearTrend:
         # 자산C: 2,000,000원 → 0원으로 급감 → "경고"(20% 임계치 초과)
         declined = cha_rows[(cha_rows["회계연도"] == 2025) & (cha_rows["재계산_당기감가상각비"] == 0)]
         assert declined["이상탐지"].iloc[0] == "경고"
+
+    def test_omitted_threshold_pct_follows_monkeypatched_global_not_stale_default(self, monkeypatch):
+        # classify_materiality와 동일한 회귀 테스트. 10% 증가는 기본 임계치(20%)로는
+        # "경고"가 아니어야 정상이지만, YOY_ANOMALY_THRESHOLD_PCT를 5%로 monkeypatch한
+        # 뒤 threshold_pct 인자를 생략하고 호출하면 새 값(5%) 기준으로 "경고"가 나와야
+        # 함수 기본값이 정의 시점에 고정되지 않았다는 것이 증명된다.
+        trend_df = pd.DataFrame([
+            {"자산ID": 1, "자산명": "자산A", "자산분류": "유형자산", "상각방법": "정액법",
+             "회계연도": 2024, "재계산_당기감가상각비": 100_000, "당기해당월수": 12, "비고": ""},
+            {"자산ID": 1, "자산명": "자산A", "자산분류": "유형자산", "상각방법": "정액법",
+             "회계연도": 2025, "재계산_당기감가상각비": 110_000, "당기해당월수": 12, "비고": ""},
+        ])
+        flagged_default = R.detect_yoy_anomalies(trend_df)  # 기본 20% 임계치 -> 10% 증가는 "-"
+        assert flagged_default[flagged_default["회계연도"] == 2025]["이상탐지"].iloc[0] == "-"
+
+        monkeypatch.setattr(R, "YOY_ANOMALY_THRESHOLD_PCT", 5.0)
+        flagged_patched = R.detect_yoy_anomalies(trend_df)  # 인자 생략 -> 새 전역값(5%) 써야 함
+        assert flagged_patched[flagged_patched["회계연도"] == 2025]["이상탐지"].iloc[0] == "경고"
 
 
 # ---------------------------------------------------------------------------
