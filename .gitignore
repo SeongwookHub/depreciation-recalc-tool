@@ -16,6 +16,9 @@ __pycache__/
 venv/
 .venv/
 
+# 로컬 실행 시 생성되는 기본 결과 파일 (재실행할 때마다 바뀌는 산출물이라 커밋 대상 아님)
+/recalc_result.xlsx
+
 # Secrets
 .env
 
