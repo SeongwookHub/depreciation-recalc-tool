@@ -55,12 +55,17 @@ without touching `config.yaml` see identical values to what was previously hardc
 column still gets sane defaults for the other 19.
 
 **Known trap when wiring a new config-driven global**: Python binds a function's default-argument values *once, at
-def time*, not on every call. `classify_materiality(diff, threshold=MATERIALITY_THRESHOLD)` and
-`detect_yoy_anomalies(df, threshold_pct=YOY_ANOMALY_THRESHOLD_PCT)` both do this — if `main()` called them with no
-second argument, a `--config` override loaded later would be silently ignored (this was a real bug, found and
-fixed). `main()` now passes the current global explicitly to both. If you add another `config.yaml`-backed global
-and a function whose default argument references it, do the same — pass the live global explicitly at the call
-site inside `main()`, don't rely on the parameter default.
+def time*, not on every call — so a signature like `def f(x, threshold=MATERIALITY_THRESHOLD)` freezes whatever the
+global was at module-load time, and a later `--config` override is silently ignored (this was a real bug). The fix
+pattern used here: give such a parameter a sentinel default of `None` and resolve the global *inside the body* at
+call time. `classify_materiality(diff, threshold=None)` and `detect_yoy_anomalies(df, threshold_pct=None)` both do
+`if threshold is None: threshold = <module global>` on entry, so they always see the current value no matter how
+they're called (`main()` still also passes the global explicitly, but that's now redundant belt-and-suspenders, not
+the sole safeguard). A related variant of the same trap: `fy_ref_date` used to *secretly read* the module global
+`FY_YEAR`; it now takes an explicit `current_fy_year` parameter instead (see "Multi-year comparison &
+`fy_ref_date`" under Architecture). When you add another `config.yaml`-backed global, prefer the
+None-sentinel-resolve-in-body pattern over a live-global default argument, and never let a helper silently read a
+config global it could just as easily receive as a parameter.
 
 The `if __name__ == "__main__":` block re-reads whichever config file `--config` points to (even if it's the
 default path — the reload is idempotent, so there's no special-casing) and reassigns
@@ -145,10 +150,33 @@ isolated to the `데이터오류` sheet per-row — they must never reach `recal
 
 ### Data-error isolation
 
-Any asset with impossible inputs (life < 1, cost ≤ 0, salvage ≥ cost, unrecognized 상각방법, etc.) is caught by
-`validate_asset_inputs()` and routed to the `데이터오류` sheet with a specific reason — it never reaches the
-recalculation functions and never aborts the run for other assets. When adding a new validation rule, follow this
-isolate-per-row pattern rather than raising.
+Any asset with impossible inputs is caught by `validate_asset_inputs()` and routed to the `데이터오류` sheet with a
+specific reason — it never reaches the recalculation functions and never aborts the run for other assets. Two kinds
+of checks:
+
+1. **Value sanity**: life < 1, cost ≤ 0, salvage ≥ cost, unrecognized 상각방법 (after `normalize_method`),
+   negative `accum_reported`/`prior_period_units`, capex or suspension pairs that are only half-filled, etc.
+2. **Event-date ordering against the acquisition date** (`acq`): an error is raised when any event date falls
+   *before* `acq` — i.e. `disposal < acq`, `reest_date < acq`, `susp_start < acq`, `susp_end < acq`, or
+   `capex_date < acq` (an event dated before the asset was even acquired). These date-order checks only run when
+   `acq` is passed — both production call sites (`main()` and `build_multi_year_trend_df()`) pass it, but callers
+   that omit `acq` skip them, which keeps the ~30 existing unit-test call sites that don't supply `acq` backward-
+   compatible.
+
+When adding a new validation rule, follow this isolate-per-row pattern rather than raising.
+
+### Multi-year comparison & `fy_ref_date`
+
+When `comparison_years` has 2+ years, `build_multi_year_trend_df(df, cols, years, current_fy_year)` recomputes each
+asset's depreciation for every listed FY (calling `recalc_asset` per year) and `detect_yoy_anomalies()` flags large
+year-over-year swings. `fy_ref_date(year, current_fy_year)` maps each FY to its reference date: it returns the
+configured `REF_DATE` for whichever `year` equals `current_fy_year` (so a non-12/31 ref date is respected for the
+current year) and `year`-12-31 for every other year. `current_fy_year` is an **explicit parameter, not a read of
+the module global `FY_YEAR`** — `recalc_accumulated_dep()` forwards its own `fy_year` argument as
+`fy_ref_date(y, fy_year)`, and `build_multi_year_trend_df()` receives `current_fy_year` and passes it through
+(`main()` supplies `FY_YEAR` at that single call site). This closes a latent trap where `fy_ref_date` trusting the
+global would return the wrong reference date for any caller processing a year other than the global FY (same class
+of issue as the "Known trap" above — pass the value, don't secretly read a global).
 
 ### AI-assisted cause estimation (optional, separate from column matching)
 
