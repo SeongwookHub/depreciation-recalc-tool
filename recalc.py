@@ -18,6 +18,7 @@ import difflib
 import os
 import sys
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
 
 import pandas as pd
 import yaml
@@ -302,7 +303,7 @@ def classify_materiality(diff: int, threshold: int = MATERIALITY_THRESHOLD) -> s
     return "유의한 차이" if abs(diff) >= threshold else "경미한 차이"
 
 
-def normalize_method(raw) -> str:
+def normalize_method(raw) -> Optional[str]:
     """
     상각방법 표기를 METHOD_ALIASES 사전으로 정규화한다("정액" -> "정액법" 등).
     공백을 지우고 소문자로 바꾼 뒤 사전에서 찾으므로 "정액법"/"정액"/"SL"/" sl "
@@ -404,7 +405,7 @@ def get_ai_estimated_cause(diff: int, elapsed_months: int, method: str,
 
 
 def get_rule_based_cause(is_reestimated: bool, is_disposed: bool, note: str,
-                          is_capex: bool = False, is_suspended: bool = False) -> str:
+                          is_capex: bool = False, is_suspended: bool = False) -> Optional[str]:
     """
     이미 계산되어 있는 처분/재추정/자본적지출/상각중단/내용연수종료 정보만으로 원인이
     명확히 설명되는 케이스를 규칙으로 1차 분류한다. 분류 가능하면 원인 문자열을,
@@ -624,24 +625,6 @@ def declining_balance_current_period_dep(acq, cost, salvage, life_years,
 # (recalc_asset의 has_extended_events 분기), 그 외의 기존 자산은 기존
 # build_straight_line_segments/declining_balance_current_period_dep를 그대로 탄다.
 # ---------------------------------------------------------------------------
-def nominal_month_index(calendar_idx: int, susp_start_idx, susp_end_idx) -> int:
-    """
-    상각중단을 반영해 달력월 인덱스를 '명목 경과월 인덱스'로 변환한다.
-    - 중단 이전: 그대로.
-    - 중단 구간 안: 경과가 멈춘 것으로 보고 중단 시작 직전월로 고정.
-    - 중단 이후: 중단 길이만큼 당겨서(상각이 그만큼 덜 진행된 것으로) 계산한다.
-    장부가액(경과개월 기반) 계산에만 쓰인다 — 구간 종료월(end_idx) 연장은
-    apply_suspension_extension이 별도로 처리한다.
-    """
-    if susp_start_idx is None:
-        return calendar_idx
-    if calendar_idx < susp_start_idx:
-        return calendar_idx
-    if calendar_idx <= susp_end_idx:
-        return susp_start_idx - 1
-    return calendar_idx - (susp_end_idx - susp_start_idx + 1)
-
-
 def _declining_balance_year_loop(start_idx, basis, salvage, rate, active_end_idx,
                                   disposal_idx, susp_start_idx, susp_end_idx, up_to_idx,
                                   floor_threshold=None):
@@ -766,8 +749,8 @@ def _book_value_at(seg: dict, up_to_idx: int, susp_start_idx, susp_end_idx) -> f
     if seg["method"] == "정액법":
         # 달력월수에서 상각중단과 겹치는 개월수를 직접 빼는 방식(구간 시작월 자체가
         # 상각중단 구간 "안"에서 시작하는 경계 케이스 — 예: 재추정이 상각중단 도중에
-        # 발생한 경우 — 에서도 정확하다). nominal_month_index로 두 지점을 각각
-        # 변환해 빼는 방식은 구간 시작월이 중단구간 안이면 그 시작월 자체가 중단
+        # 발생한 경우 — 에서도 정확하다). 시작/종료 두 지점을 각각 "명목 경과월"로
+        # 변환해서 빼는 방식은 구간 시작월이 중단구간 안이면 그 시작월 자체가 중단
         # 시작 직전월로 고정돼버려 elapsed가 부정확해지므로 쓰지 않는다.
         total_months = up_to_idx - seg["start_idx"] + 1
         susp_months = 0

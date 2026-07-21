@@ -142,6 +142,63 @@ class TestReestimation:
         assert life_ended is False
         assert "내용연수재추정(2025-01-01→3년)" in note
 
+    def test_declining_balance_reestimation_same_method(self):
+        # 취득 2021-01-01, 취득원가 10,000,000, 잔존가치 0, 원내용연수 10년(상각률 0.259)
+        # 2024-01-01에 상각방법은 정률법을 유지한 채 내용연수만 5년(상각률 0.451)으로 재추정.
+        # method="정률법"/reest_method=None(방법 변경 없음)인 이 조합은 통합 이벤트
+        # 엔진이 아니라 예전부터 있던 declining_balance_current_period_dep 경로를 타는데,
+        # 이 경로의 재추정 분기(recalc.py:588-590)는 지금까지 자동 테스트가 전혀
+        # 지나가지 않고 있었다(coverage 0%) — 정액법 재추정만 테스트돼 있었음.
+        #
+        # 매년 "기초장부가액 x 상각률"을 독립적으로 손계산해 정답을 미리 구한다
+        # (재추정 전 3개년은 상각률 0.259, 재추정 후는 0.451을 곱함. 5% 특례
+        # 기준값은 원취득가액의 5% = 500,000원으로 재추정 후에도 그대로 유지):
+        #   2021: 10,000,000 x0.259           = 2,590,000  -> 장부가 7,410,000
+        #   2022:  7,410,000 x0.259           = 1,919,190  -> 장부가 5,490,810
+        #   2023:  5,490,810 x0.259           = 1,422,119.79(반올림 1,422,120) -> 장부가 4,068,690.21
+        #   2024:  4,068,690.21 x0.451(재추정) = 1,834,979.28(반올림 1,834,979) -> 장부가 2,233,710.93
+        #   2025:  2,233,710.93 x0.451         = 1,007,403.63(반올림 1,007,404) -> 장부가 1,226,307.30
+        # (책값 - 상각액이 500,000원 이하로 떨어지는 해가 없으므로 2025년까지는
+        #  5% 특례가 발동하지 않는다 — 발동 시점은 아래 boundary 테스트에서 별도 확인)
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=10, method="정률법",
+            disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=5,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+        )
+        assert dep == 1_007_404
+        assert months == 12
+        assert life_ended is False
+        assert "내용연수재추정(2024-01-01→5년)" in note
+
+    def test_declining_balance_reestimation_life_ended_boundary(self):
+        # 위 테스트와 같은 자산. 재추정후내용연수 5년은 2024-01-01부터 2028-12-31까지다.
+        # 실제로는 5% 특례가 2027년에 발동해 장부가액이 그 해에 0원으로 완전히
+        # 상각되지만(아래에서 함께 확인), life_ended 플래그 자체는 "특례로 이미
+        # 다 상각됐는가"가 아니라 "재추정후내용연수의 명목 종료월(2028-12)을
+        # 기준일이 지났는가"만 본다 — 그래서 2028년(명목 종료월 이내)은
+        # life_ended=False, 2029년(명목 종료월을 지남)은 life_ended=True가 되어야
+        # 정상이다. 손계산으로 이어서 구한 장부가액:
+        #   2026: 673,242.71 x... 아래 2026/2027 두 해만 이어서 계산
+        #   2026:  1,226,307.30 x0.451 = 553,064.59(반올림 553,065) -> 장부가 673,242.71
+        #   2027:  673,242.71 x0.451 = 303,632.66 -> "장부가-상각액"=369,610.05 <= 500,000(5%특례)
+        #         이므로 잔여 전액(673,242.71) 상각 -> 장부가 0
+        #   2028:  장부가액이 이미 0이므로 상각액 0(하지만 life_ended는 여전히 False)
+        #   2029:  명목 종료월(2028-12)을 지났으므로 상각개월수 0, life_ended=True
+        for fy, expected_dep, expected_months, expected_life_ended in [
+            (2026, 553_065, 12, False),
+            (2027, 673_243, 12, False),
+            (2028, 0, 12, False),
+            (2029, 0, 0, True),
+        ]:
+            dep, months, life_ended, _ = R.recalc_asset(
+                acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=10, method="정률법",
+                disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=5,
+                ref_date=dt.date(fy, 12, 31), fy_year=fy,
+            )
+            assert dep == expected_dep, f"fy={fy}: dep {dep} != {expected_dep}"
+            assert months == expected_months, f"fy={fy}: months {months} != {expected_months}"
+            assert life_ended is expected_life_ended, f"fy={fy}: life_ended {life_ended} != {expected_life_ended}"
+
 
 # ---------------------------------------------------------------------------
 # 6) 내용연수 종료 처리
@@ -557,18 +614,9 @@ class TestValidateAssetInputsExtendedEvents:
 
 
 # ---------------------------------------------------------------------------
-# 14) 상각중단 연장 로직 (nominal_month_index / apply_suspension_extension)
+# 14) 상각중단 연장 로직 (apply_suspension_extension)
 # ---------------------------------------------------------------------------
 class TestSuspensionExtension:
-    def test_nominal_month_index_before_during_after(self):
-        susp_s, susp_e = R.month_index(2022, 6), R.month_index(2022, 12)  # 7개월
-        # 중단 이전: 그대로
-        assert R.nominal_month_index(R.month_index(2022, 3), susp_s, susp_e) == R.month_index(2022, 3)
-        # 중단 구간 안: 중단시작 직전월로 고정
-        assert R.nominal_month_index(R.month_index(2022, 9), susp_s, susp_e) == susp_s - 1
-        # 중단 이후: 중단 길이(7개월)만큼 당겨짐
-        assert R.nominal_month_index(R.month_index(2023, 1), susp_s, susp_e) == R.month_index(2023, 1) - 7
-
     def test_extends_when_suspension_in_last_segment(self):
         segments = [dict(start_idx=R.month_index(2020, 1), end_idx=R.month_index(2024, 12))]
         susp_s, susp_e = R.month_index(2022, 6), R.month_index(2022, 12)
@@ -1182,6 +1230,85 @@ class TestResultColumnsAfterRemoval:
         # 불일치자산 1건만 들어가 있어야 한다.
         diff_names = [wb["차이자산"].cell(row=r, column=1).value for r in range(2, wb["차이자산"].max_row + 1)]
         assert diff_names == ["불일치자산"]
+
+    def test_invalid_row_isolated_to_error_sheet_end_to_end(self, tmp_path):
+        # validate_asset_inputs 자체는 단위테스트가 잘 돼 있지만, main()이 그 결과를
+        # 받아 실제로 "데이터오류" 시트에 올바른 컬럼과 함께 기록하고, 정상 자산은
+        # "재계산결과"에만 남기는 전체 배선(1449~1487번째 줄 근처)은 지금까지 어떤
+        # 테스트도 거치지 않았다(coverage 0%) — main()을 end-to-end로 돌려 확인한다.
+        import openpyxl
+
+        rows = [
+            # 정상 자산: 정액법, 취득원가 6,000,000원, 내용연수10년, 취득 2020-01-01.
+            ["정상자산", "유형자산", dt.date(2020, 1, 1), 6_000_000, 0, 10, "정액법", 600_000,
+             None, None, None, None, None, None, None, None, None, None, None, None],
+            # 데이터오류 자산: 내용연수 0년(계산 불가능한 값).
+            ["오류자산", "유형자산", dt.date(2020, 1, 1), 6_000_000, 0, 0, "정액법", 600_000,
+             None, None, None, None, None, None, None, None, None, None, None, None],
+        ]
+        out_path = self._run_main_with(tmp_path, rows)
+        wb = openpyxl.load_workbook(out_path)
+
+        # 재계산결과 시트에는 정상자산만 있어야 한다.
+        result_names = [wb["재계산결과"].cell(row=r, column=1).value
+                         for r in range(2, wb["재계산결과"].max_row + 1)]
+        assert result_names == ["정상자산"]
+
+        # 데이터오류 시트에는 오류자산 1건이, 자산명/취득원가 등 원본 컬럼값 그대로,
+        # 그리고 오류사유가 채워진 채로 들어가야 한다.
+        error_ws = wb["데이터오류"]
+        error_header = [c.value for c in error_ws[1]]
+        error_row = [error_ws.cell(row=2, column=c + 1).value for c in range(len(error_header))]
+        error_record = dict(zip(error_header, error_row))
+
+        assert error_ws.max_row == 2  # 헤더 1행 + 오류자산 1행
+        assert error_record["자산명"] == "오류자산"
+        assert error_record["취득원가"] == 6_000_000
+        assert "내용연수" in error_record["오류사유"]
+
+
+# ---------------------------------------------------------------------------
+# 24) 다기간(연도별) 비교 시트 생성 (COMPARISON_YEARS 2개 이상)
+# ---------------------------------------------------------------------------
+class TestMultiYearSheetsEndToEnd:
+    def test_comparison_years_produces_trend_sheets(self, tmp_path, monkeypatch):
+        # main() 안의 다기간 비교 분기(len(COMPARISON_YEARS) > 1일 때 연도별추이/
+        # 연도별요약 시트를 만드는 경로)는 지난 세션에 --config로 수동 실행해
+        # 눈으로만 확인했을 뿐, 자동 회귀 테스트가 없었다(coverage 0%).
+        # COMPARISON_YEARS를 2개 연도로 monkeypatch한 뒤 실제로 두 시트가
+        # 생성되는지, 그리고 연도별요약(피벗) 시트에 두 연도 컬럼이 모두 있는지 확인한다.
+        import openpyxl
+
+        cols = ["자산명", "자산분류(유형자산/무형자산)", "취득일", "취득원가", "잔존가치", "내용연수(년)",
+                "상각방법(정액법/정률법)", "회사반영_당기감가상각비", "처분일", "내용연수재추정일",
+                "재추정후내용연수(년)", "재추정후상각방법(정액법/정률법)", "총예정생산량", "당기실제생산량",
+                "전기말누적생산량", "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
+                "회사반영_전기말감가상각누계액"]
+        rows = [
+            ["다기간자산", "유형자산", dt.date(2020, 1, 1), 6_000_000, 0, 10, "정액법", 600_000,
+             None, None, None, None, None, None, None, None, None, None, None, None],
+        ]
+        in_path = tmp_path / "in.xlsx"
+        out_path = tmp_path / "out.xlsx"
+        pd.DataFrame(rows, columns=cols).to_excel(in_path, index=False)
+
+        monkeypatch.setattr(R, "COMPARISON_YEARS", [2024, 2025])
+        orig_in, orig_out = R.IN_PATH, R.OUT_PATH
+        R.IN_PATH, R.OUT_PATH = str(in_path), str(out_path)
+        try:
+            R.main()
+        finally:
+            R.IN_PATH, R.OUT_PATH = orig_in, orig_out
+        # monkeypatch가 함수 종료 시 R.COMPARISON_YEARS를 자동으로 원래 값(기본
+        # [FY_YEAR])으로 되돌려 다른 테스트에 영향을 주지 않는다.
+
+        wb = openpyxl.load_workbook(out_path)
+        assert "연도별추이" in wb.sheetnames
+        assert "연도별요약" in wb.sheetnames
+
+        pivot_header = [c.value for c in wb["연도별요약"][1]]
+        assert 2024 in pivot_header
+        assert 2025 in pivot_header
 
 
 # ---------------------------------------------------------------------------
