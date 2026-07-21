@@ -347,6 +347,9 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
     acq(취득일)는 처분일/재추정일/상각중단시작일·종료일/자본적지출일이 취득일보다
     앞서는(=취득도 하기 전에 이벤트가 발생한) 순서 오류를 잡는 데만 쓰인다 — acq를
     넘기지 않으면(기본값 None) 비교 기준이 없으므로 이 순서 검증은 조용히 건너뛴다.
+    이와 별개로, 재추정일이 처분일보다 늦은 경우(이미 처분해 상각 대상이 사라진 뒤
+    내용연수를 재추정하는 모순)도 순서 오류로 잡는다 — reest_date/disposal 둘 다
+    있을 때만 검사한다.
     """
     errors = []
     if method is not None and method not in KNOWN_METHODS:
@@ -386,6 +389,8 @@ def validate_asset_inputs(cost: float, salvage: float, life: int,
         errors.append(f"상각중단종료일 오류(상각중단종료일={susp_end}이 취득일={acq}보다 빠름)")
     if capex_date is not None and acq is not None and capex_date < acq:
         errors.append(f"자본적지출일 오류(자본적지출일={capex_date}이 취득일={acq}보다 빠름)")
+    if reest_date is not None and disposal is not None and reest_date > disposal:
+        errors.append(f"내용연수재추정일 오류(재추정일={reest_date}이 처분일={disposal}보다 늦음)")
     return errors
 
 

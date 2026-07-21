@@ -12,7 +12,7 @@ import recalc as R
 
 
 # ---------------------------------------------------------------------------
-# 1) 월할상각 경과개월수 계산 (elapsed_months_to_ref / month_index)
+# 월할상각 경과개월수 계산 (elapsed_months_to_ref / month_index)
 # ---------------------------------------------------------------------------
 class TestElapsedMonths:
     def test_month_index_basic(self):
@@ -33,7 +33,7 @@ class TestElapsedMonths:
 
 
 # ---------------------------------------------------------------------------
-# 2) 정액법 재계산
+# 정액법 재계산
 # ---------------------------------------------------------------------------
 class TestStraightLine:
     def test_basic_full_year(self):
@@ -65,7 +65,7 @@ class TestStraightLine:
 
 
 # ---------------------------------------------------------------------------
-# 3) 정률법 재계산
+# 정률법 재계산
 # ---------------------------------------------------------------------------
 class TestDecliningBalance:
     def test_third_year_of_depreciation(self):
@@ -94,7 +94,7 @@ class TestDecliningBalance:
 
 
 # ---------------------------------------------------------------------------
-# 4) 처분자산 처리 (당기 중 처분 시 처분일까지만 상각)
+# 처분자산 처리 (당기 중 처분 시 처분일까지만 상각)
 # ---------------------------------------------------------------------------
 class TestDisposal:
     def test_straight_line_disposal_mid_year(self):
@@ -123,7 +123,7 @@ class TestDisposal:
 
 
 # ---------------------------------------------------------------------------
-# 5) 내용연수 재추정 처리
+# 내용연수 재추정 처리
 # ---------------------------------------------------------------------------
 class TestReestimation:
     def test_straight_line_reestimation(self):
@@ -201,7 +201,7 @@ class TestReestimation:
 
 
 # ---------------------------------------------------------------------------
-# 6) 내용연수 종료 처리
+# 내용연수 종료 처리
 # ---------------------------------------------------------------------------
 class TestLifeEnded:
     def test_straight_line_life_ended(self):
@@ -230,7 +230,7 @@ class TestLifeEnded:
 
 
 # ---------------------------------------------------------------------------
-# 7) 중요성 기준 판정
+# 중요성 기준 판정
 # ---------------------------------------------------------------------------
 class TestMateriality:
     def test_diff_zero_is_minor(self):
@@ -265,7 +265,7 @@ class TestMateriality:
 
 
 # ---------------------------------------------------------------------------
-# 8) 입력값 검증 (validate_asset_inputs) - 계산 불가능한 값은 "데이터 오류"로 분리
+# 입력값 검증 (validate_asset_inputs) - 계산 불가능한 값은 "데이터 오류"로 분리
 # ---------------------------------------------------------------------------
 class TestValidateAssetInputs:
     def test_life_zero_is_invalid(self):
@@ -334,12 +334,33 @@ class TestValidateAssetInputs:
 
     def test_dates_on_or_after_acquisition_are_valid(self):
         # 취득일과 같은 날(경계값 포함) 또는 그 이후면 정상 — 순서 검증에 걸리면 안 된다.
+        # 재추정일(2022-01-01)==처분일(2022-01-01)로 둬서 "재추정일>처분일" 규칙의
+        # 경계(같은 날은 '늦음'이 아니라 정상)도 함께 만족시킨다.
         errors = R.validate_asset_inputs(
             cost=10_000_000, salvage=0, life=5, acq=dt.date(2022, 1, 1),
-            disposal=dt.date(2022, 1, 1), reest_date=dt.date(2023, 1, 1),
+            disposal=dt.date(2022, 1, 1), reest_date=dt.date(2022, 1, 1),
             susp_start=dt.date(2022, 6, 1), susp_end=dt.date(2022, 12, 31),
             capex_date=dt.date(2022, 1, 1), capex_amount=1_000_000)
         assert errors == []
+
+    def test_reest_date_after_disposal_is_invalid(self):
+        # 이미 처분한 자산(2024-06-30 처분)을 그 뒤(2024-12-31)에 내용연수 재추정하는 것은
+        # 상각 대상이 사라진 뒤의 재추정이라 논리적으로 불가능 — 순서 오류로 잡아야 한다.
+        errors = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, acq=dt.date(2021, 1, 1),
+            disposal=dt.date(2024, 6, 30), reest_date=dt.date(2024, 12, 31))
+        assert any("내용연수재추정일" in e and "처분일" in e for e in errors)
+
+    def test_reest_date_on_or_before_disposal_is_valid(self):
+        # 재추정일 <= 처분일이면 정상. 같은 날(경계)과 그 이전 모두 오류가 없어야 한다.
+        same_day = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, acq=dt.date(2021, 1, 1),
+            disposal=dt.date(2024, 6, 30), reest_date=dt.date(2024, 6, 30))
+        assert same_day == []
+        before = R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, acq=dt.date(2021, 1, 1),
+            disposal=dt.date(2024, 6, 30), reest_date=dt.date(2023, 1, 1))
+        assert before == []
 
     def test_date_order_checks_skipped_when_acq_not_provided(self):
         # acq를 안 넘기면(기본값 None) 비교 기준이 없으므로 순서 검증 자체를
@@ -364,7 +385,7 @@ class TestRoundWon:
 
 
 # ---------------------------------------------------------------------------
-# 9) 생산량비례법 (units_of_production_current_period_dep)
+# 생산량비례법 (units_of_production_current_period_dep)
 # ---------------------------------------------------------------------------
 class TestUnitsOfProduction:
     def test_basic_ratio(self):
@@ -443,7 +464,7 @@ class TestValidateAssetInputsUnitsOfProduction:
 
 
 # ---------------------------------------------------------------------------
-# 10) 자산군별 통계 (build_category_summary)
+# 자산군별 통계 (build_category_summary)
 # ---------------------------------------------------------------------------
 class TestCategorySummary:
     def test_summary_counts_and_mismatch_rate(self):
@@ -479,7 +500,7 @@ class TestCategorySummary:
 
 
 # ---------------------------------------------------------------------------
-# 11) 룰 기반 원인 분류 (get_rule_based_cause)
+# 룰 기반 원인 분류 (get_rule_based_cause)
 # ---------------------------------------------------------------------------
 class TestRuleBasedCause:
     def test_disposed_current_year(self):
@@ -527,7 +548,7 @@ class TestRuleBasedCause:
 
 
 # ---------------------------------------------------------------------------
-# 12) 다기간(연도별) 비교 (fy_ref_date / build_multi_year_trend_df / detect_yoy_anomalies)
+# 다기간(연도별) 비교 (fy_ref_date / build_multi_year_trend_df / detect_yoy_anomalies)
 # ---------------------------------------------------------------------------
 def _make_cols(df):
     required = ["자산명", "자산분류", "취득일", "취득원가", "잔존가치", "내용연수", "상각방법", "회사반영상각비"]
@@ -644,7 +665,7 @@ class TestMultiYearTrend:
 
 
 # ---------------------------------------------------------------------------
-# 13) 확장 이벤트(자본적지출/상각중단/방법변경) 입력값 검증
+# 확장 이벤트(자본적지출/상각중단/방법변경) 입력값 검증
 # ---------------------------------------------------------------------------
 class TestValidateAssetInputsExtendedEvents:
     def test_invalid_reest_method(self):
@@ -699,7 +720,7 @@ class TestValidateAssetInputsExtendedEvents:
 
 
 # ---------------------------------------------------------------------------
-# 14) 상각중단 연장 로직 (apply_suspension_extension)
+# 상각중단 연장 로직 (apply_suspension_extension)
 # ---------------------------------------------------------------------------
 class TestSuspensionExtension:
     def test_extends_when_suspension_in_last_segment(self):
@@ -720,7 +741,7 @@ class TestSuspensionExtension:
 
 
 # ---------------------------------------------------------------------------
-# 15) recalc_asset 통합 — 자본적지출/상각중단/방법변경 (손계산 검증)
+# recalc_asset 통합 — 자본적지출/상각중단/방법변경 (손계산 검증)
 # ---------------------------------------------------------------------------
 class TestRecalcAssetExtendedEvents:
     def test_capex_only(self):
@@ -822,7 +843,7 @@ class TestRecalcAssetExtendedEvents:
 
 
 # ---------------------------------------------------------------------------
-# 16) 전기말 감가상각누계액 재계산 (recalc_accumulated_dep)
+# 전기말 감가상각누계액 재계산 (recalc_accumulated_dep)
 # ---------------------------------------------------------------------------
 class TestAccumulatedDepreciation:
     def test_plain_asset_sums_full_years(self):
@@ -897,7 +918,7 @@ class TestAccumulatedDepreciation:
 
 
 # ---------------------------------------------------------------------------
-# 17) 법인세법 시행규칙 [별표4] 상각률표 반영 (RATE_TABLE 전면 교체)
+# 법인세법 시행규칙 [별표4] 상각률표 반영 (RATE_TABLE 전면 교체)
 # ---------------------------------------------------------------------------
 class TestRateTable:
     def test_life2_life3_match_official_table(self):
@@ -925,7 +946,7 @@ class TestRateTable:
 
 
 # ---------------------------------------------------------------------------
-# 18) 정률법 5% 잔존가액 특례(법인세법 시행규칙 [별표4] 관련 규정)
+# 정률법 5% 잔존가액 특례(법인세법 시행규칙 [별표4] 관련 규정)
 # ---------------------------------------------------------------------------
 class TestDecliningBalance5PctFloor:
     def test_full_writeoff_when_book_value_first_hits_5pct_of_cost(self):
@@ -944,9 +965,19 @@ class TestDecliningBalance5PctFloor:
         assert months == 12
 
     def test_year_before_floor_is_unaffected(self):
-        # 같은 자산의 2024년(4년차)은 아직 5% 기준에 못 미치므로(908,426.43>500,000)
-        # 정상적인 감가상각률 계산만 적용된다: 1,654,691.49*0.451≈746,265~746,266
-        # (부동소수 누적 오차로 실행 결과는 746,266원 — 실제 실행 결과로 확정).
+        # 같은 자산의 2024년(4년차)은 아직 5% 기준에 못 미치므로(장부가액 908,426.43>500,000)
+        # 정상적인 감가상각률 계산만 적용된다: 1,654,691.49*0.451 = 746,265.86 → 746,266원.
+        #
+        # 기대값을 손계산 수치로 직접 박지 않고 "실제 실행 결과로 확정"한 이유:
+        # 이 4년차 상각액은 2021~2023년 3개년치 `book_value -= book_value*rate`를 float로
+        # 반복해 얻은 장부가액(1,654,691.49...)에 상각률을 다시 곱한 값이다. 파이썬 float는
+        # 이진 부동소수라, 이런 곱셈·뺄셈이 여러 해 누적되면 십진수로는 딱 떨어지는 값도
+        # 미세한 표현 오차(...49999 같은 꼬리)를 안게 된다. 그 오차가 마지막 원 단위
+        # 반올림(ROUND_HALF_UP)의 .5 경계에 걸리는 해에는 손으로 십진 계산한 값과 구현이
+        # 내는 값이 1원 어긋날 수 있으므로, 다년 float 누적 장부가액이 관여하는 기대값은
+        # 손계산 대신 검증된 실제 파이프라인 출력(746,266원)으로 고정하는 방침을 따른다.
+        # (이 케이스 자체는 소수부가 .86이라 반올림 경계에서 충분히 멀어 손계산 결과와
+        #  일치하지만, 경계 근처 해에서 깨지지 않도록 동일 방침을 일관되게 적용한다.)
         dep, months, life_ended, note = R.recalc_asset(
             acq=dt.date(2021, 1, 1), cost=10_000_000, salvage=0, life=5, method="정률법",
             disposal=None, reest_date=None, reest_life=None,
@@ -979,7 +1010,7 @@ class TestDecliningBalance5PctFloor:
 
 
 # ---------------------------------------------------------------------------
-# 19) 엑셀 수식 주입용 메타데이터 (get_period_formula_meta)
+# 엑셀 수식 주입용 메타데이터 (get_period_formula_meta)
 # ---------------------------------------------------------------------------
 class TestPeriodFormulaMeta:
     def test_plain_straight_line_is_simple_and_accum_eligible(self):
@@ -1115,7 +1146,7 @@ class TestPeriodFormulaMeta:
 
 
 # ---------------------------------------------------------------------------
-# 20) 이중체감법(DDB) 재계산 — 상각률=2/내용연수, 하한=잔존가치(세법상 5% 특례 없음)
+# 이중체감법(DDB) 재계산 — 상각률=2/내용연수, 하한=잔존가치(세법상 5% 특례 없음)
 # ---------------------------------------------------------------------------
 class TestDoubleDecliningBalance:
     def test_basic_rate_and_floor(self):
@@ -1194,7 +1225,7 @@ class TestDoubleDecliningBalance:
 
 
 # ---------------------------------------------------------------------------
-# 21) 연수합계법(SYD) 재계산 — 그 해의 몫 (N-k+1)/(N(N+1)/2), 기준가액은 고정
+# 연수합계법(SYD) 재계산 — 그 해의 몫 (N-k+1)/(N(N+1)/2), 기준가액은 고정
 # ---------------------------------------------------------------------------
 class TestSumOfYearsDigits:
     def test_basic_matches_closed_form_fraction(self):
@@ -1270,7 +1301,7 @@ class TestSumOfYearsDigits:
 
 
 # ---------------------------------------------------------------------------
-# 22) "일치여부"/"수식여부" 열 삭제 회귀 테스트 (main() 종단 실행)
+# "일치여부"/"수식여부" 열 삭제 회귀 테스트 (main() 종단 실행)
 # ---------------------------------------------------------------------------
 class TestResultColumnsAfterRemoval:
     def _run_main_with(self, tmp_path, rows):
@@ -1353,7 +1384,7 @@ class TestResultColumnsAfterRemoval:
 
 
 # ---------------------------------------------------------------------------
-# 24) 다기간(연도별) 비교 시트 생성 (COMPARISON_YEARS 2개 이상)
+# 다기간(연도별) 비교 시트 생성 (COMPARISON_YEARS 2개 이상)
 # ---------------------------------------------------------------------------
 class TestMultiYearSheetsEndToEnd:
     def test_comparison_years_produces_trend_sheets(self, tmp_path, monkeypatch):
@@ -1397,7 +1428,7 @@ class TestMultiYearSheetsEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# 23) 상각방법 표기 정규화 (normalize_method / METHOD_ALIASES)
+# 상각방법 표기 정규화 (normalize_method / METHOD_ALIASES)
 # ---------------------------------------------------------------------------
 class TestNormalizeMethod:
     def test_exact_names_pass_through(self):
@@ -1449,7 +1480,7 @@ class TestValidateAssetInputsUnknownMethod:
 
 
 # ---------------------------------------------------------------------------
-# 24) 컬럼명 동의어 매칭 (_find_column / COLUMN_SYNONYMS)
+# 컬럼명 동의어 매칭 (_find_column / COLUMN_SYNONYMS)
 # ---------------------------------------------------------------------------
 class TestFindColumn:
     def test_exact_match_takes_priority_over_synonym(self):
@@ -1481,7 +1512,7 @@ class TestFindColumn:
 
 
 # ---------------------------------------------------------------------------
-# 25) 컬럼 인식 종단 테스트 (resolve_columns) — 동의어 매칭 / 실패 시 추천 메시지
+# 컬럼 인식 종단 테스트 (resolve_columns) — 동의어 매칭 / 실패 시 추천 메시지
 # ---------------------------------------------------------------------------
 class TestResolveColumns:
     def test_required_column_resolved_via_synonym_without_editing_column_map(self):
@@ -1526,7 +1557,7 @@ class TestResolveColumns:
 
 
 # ---------------------------------------------------------------------------
-# 25) config.yaml 설정 로딩 (load_config / _cfg_get / _parse_ref_date / resolve_settings)
+# config.yaml 설정 로딩 (load_config / _cfg_get / _parse_ref_date / resolve_settings)
 # ---------------------------------------------------------------------------
 class TestLoadConfig:
     def test_missing_file_returns_empty_dict(self, tmp_path):
