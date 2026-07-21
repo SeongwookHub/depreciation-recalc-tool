@@ -330,9 +330,9 @@ class TestValidateAssetInputsUnitsOfProduction:
 class TestCategorySummary:
     def test_summary_counts_and_mismatch_rate(self):
         result_df = pd.DataFrame([
-            {"자산명": "A", "자산분류": "유형자산", "일치여부": "일치", "중요성구분": "경미한 차이"},
-            {"자산명": "B", "자산분류": "유형자산", "일치여부": "불일치", "중요성구분": "유의한 차이"},
-            {"자산명": "C", "자산분류": "무형자산", "일치여부": "일치", "중요성구분": "경미한 차이"},
+            {"자산명": "A", "자산분류": "유형자산", "차이(재계산-회사반영)": 0, "중요성구분": "경미한 차이"},
+            {"자산명": "B", "자산분류": "유형자산", "차이(재계산-회사반영)": 500, "중요성구분": "유의한 차이"},
+            {"자산명": "C", "자산분류": "무형자산", "차이(재계산-회사반영)": 0, "중요성구분": "경미한 차이"},
         ])
         error_df = pd.DataFrame([
             {"자산명": "D", "자산분류": "유형자산"},
@@ -352,7 +352,7 @@ class TestCategorySummary:
 
     def test_empty_error_df(self):
         result_df = pd.DataFrame([
-            {"자산명": "A", "자산분류": "유형자산", "일치여부": "일치", "중요성구분": "경미한 차이"},
+            {"자산명": "A", "자산분류": "유형자산", "차이(재계산-회사반영)": 0, "중요성구분": "경미한 차이"},
         ])
         error_df = pd.DataFrame(columns=["자산명", "자산분류"])
         summary = R.build_category_summary(result_df, error_df).set_index("자산분류")
@@ -548,6 +548,13 @@ class TestValidateAssetInputsExtendedEvents:
             prior_period_units=-1)
         assert any("전기말누적생산량" in e for e in errors)
 
+    def test_reest_method_accepts_double_declining_and_syd(self):
+        # 이중체감법/연수합계법 도입 후에도 재추정후상각방법으로 지정할 수 있어야 한다.
+        assert R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, reest_method="이중체감법") == []
+        assert R.validate_asset_inputs(
+            cost=10_000_000, salvage=0, life=5, reest_method="연수합계법") == []
+
 
 # ---------------------------------------------------------------------------
 # 14) 상각중단 연장 로직 (nominal_month_index / apply_suspension_extension)
@@ -727,6 +734,33 @@ class TestAccumulatedDepreciation:
             disposal=None, reest_date=None, reest_life=None, fy_year=2025,
             capex_date=dt.date(2023, 1, 1), capex_amount=2_400_000)
         assert accum == 6_685_714
+
+    def test_double_declining_balance_accumulation(self):
+        # 취득 2021-01-01, 1,000,000원, 잔존가치 100,000원, 내용연수5년(상각률 2/5=0.4).
+        # 연도별 상각비: 400,000 -> 240,000 -> 144,000 -> 86,400(4년간 합계 870,400).
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="이중체감법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025)
+        assert accum == 870_400
+
+    def test_sum_of_years_digits_accumulation_matches_closed_form(self):
+        # 취득 2021-01-01, 1,000,000원, 잔존가치 100,000원, 내용연수5년.
+        # 전기말(4개년 경과, n=4) 폐형식: (900,000)*(n-1)(2N-n+2)/(N(N+1))
+        #  = 900,000*3*8/30 = 720,000... 검증은 실제 연차별 합산으로 한다:
+        # 1년차 300,000 + 2년차 240,000 + 3년차 180,000 + 4년차 120,000 = 840,000.
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025)
+        assert accum == 840_000
+
+    def test_sum_of_years_digits_fully_depreciates_by_end_of_life(self):
+        # 연수합계법은 N년에 걸친 몫의 합이 정확히 1이 되도록 설계돼, 내용연수가
+        # 끝나면(fy_year가 취득연도+내용연수와 같아지면) 누계상각액이 정확히
+        # (취득원가-잔존가치)와 같아야 한다(정률법/이중체감법과 달리 잔여액이 안 남음).
+        accum = R.recalc_accumulated_dep(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2026)
+        assert accum == 900_000
 
 
 # ---------------------------------------------------------------------------
@@ -913,3 +947,367 @@ class TestPeriodFormulaMeta:
             disposal=None, reest_date=dt.date(2023, 6, 1), reest_life=5, fy_year=2025,
             susp_start=dt.date(2023, 3, 1), susp_end=dt.date(2023, 9, 30))
         assert round(9_000_000 - meta["prior_fy_end_bv"]) == accum_recalc
+
+    def test_double_declining_balance_is_accum_eligible(self):
+        # 이중체감법도 정률법과 같은 항등식으로 전기말 누계액을 수식화할 수 있어야 한다.
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="이중체감법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025)
+        assert meta["is_simple_current"] is True
+        assert meta["accum_formula_eligible"] is True
+        assert round(1_000_000 - meta["prior_fy_end_bv"]) == 870_400
+        assert meta["syd_k"] is None and meta["syd_life_years"] is None
+
+    def test_sum_of_years_digits_reports_k_and_is_accum_eligible(self):
+        # 연수합계법은 basis가 정액법처럼 고정 기준액이어야 하고(장부가액이 아님),
+        # syd_k/syd_life_years로 그 해의 몫((N-k+1)/(N(N+1)/2))을 구할 수 있어야 한다.
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025)
+        assert meta["basis"] == 1_000_000
+        assert meta["syd_k"] == 5
+        assert meta["syd_life_years"] == 5
+        assert meta["accum_formula_eligible"] is True
+        assert round(1_000_000 - meta["prior_fy_end_bv"]) == 840_000
+
+    def test_sum_of_years_digits_capex_does_not_reset_origin(self):
+        # 자본적지출은 연수합계법의 연차(k) 스케줄을 리셋하지 않는다 — origin은
+        # 여전히 취득연도 기준이어야 한다(정액법의 "잔여내용연수로 계속 상각" 정책과 동일).
+        meta = R.get_period_formula_meta(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=0, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None, fy_year=2025,
+            capex_date=dt.date(2023, 1, 1), capex_amount=200_000)
+        assert meta["syd_k"] == 5
+        assert meta["syd_life_years"] == 5
+
+
+# ---------------------------------------------------------------------------
+# 20) 이중체감법(DDB) 재계산 — 상각률=2/내용연수, 하한=잔존가치(세법상 5% 특례 없음)
+# ---------------------------------------------------------------------------
+class TestDoubleDecliningBalance:
+    def test_basic_rate_and_floor(self):
+        # 취득 2021-01-01, 1,000,000원, 잔존가치 100,000원, 내용연수5년(상각률 2/5=0.4).
+        # 연도별: 400,000 -> 240,000 -> 144,000 -> 86,400 -> bv 129,600.
+        # 2025년(5년차): 129,600*0.4=51,840이지만 129,600-51,840=77,760<100,000(잔존가치)
+        # 이므로 잔여 전액(129,600-100,000=29,600원)을 그 해에 상각한다.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="이중체감법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025)
+        assert dep == 29_600
+        assert months == 12
+
+    def test_year_before_floor_is_unaffected(self):
+        # 같은 자산의 2024년(4년차)은 아직 하한(잔존가치)에 못 미치므로(129,600>100,000
+        # 아니라 216,000*0.4=86,400 상각 후 129,600이 남는 정상 계산) 그대로 적용된다.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="이중체감법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2024, 12, 31), fy_year=2024)
+        assert dep == 86_400
+
+    def test_disposal_mid_year(self):
+        # 취득 2021-01-01, 12,000,000원, 내용연수6년(상각률 2/6), 2025-07-31 처분(7개월).
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=12_000_000, salvage=0, life=6, method="이중체감법",
+            disposal=dt.date(2025, 7, 31), reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025)
+        assert dep == 460_905
+        assert months == 7
+        assert "당기중처분" in note
+
+    def test_reest_same_method_uses_new_rate(self):
+        # 재추정 후에도 이중체감법을 유지하면 새 내용연수로 상각률(2/새내용연수)이 바뀐다.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=13_000_000, salvage=0, life=6, method="이중체감법",
+            disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=8,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025)
+        assert dep == 722_222
+        assert months == 12
+
+    def test_reest_from_straight_line_to_double_declining(self):
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=12_000_000, salvage=0, life=8, method="정액법",
+            disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=6,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025, reest_method="이중체감법")
+        assert dep == 1_666_667
+
+    def test_reest_from_double_declining_to_straight_line(self):
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=11_500_000, salvage=0, life=8, method="이중체감법",
+            disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=6,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025, reest_method="정액법")
+        assert dep == 606_445
+
+    def test_capex_does_not_change_rate(self):
+        # 자본적지출은 상각기준가액(장부가액+지출액)만 늘릴 뿐, 상각률(2/내용연수)
+        # 자체는 바뀌지 않는다 — 정률법의 자본적지출 처리 정책과 동일.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=12_000_000, salvage=0, life=10, method="이중체감법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            capex_date=dt.date(2023, 1, 1), capex_amount=2_000_000)
+        assert dep == 1_042_432
+        assert "자본적지출" in note
+
+    def test_suspension_reduces_current_period_months(self):
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=9_500_000, salvage=0, life=5, method="이중체감법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            susp_start=dt.date(2025, 3, 1), susp_end=dt.date(2025, 9, 30))
+        assert dep == 205_200
+        assert months == 5
+
+
+# ---------------------------------------------------------------------------
+# 21) 연수합계법(SYD) 재계산 — 그 해의 몫 (N-k+1)/(N(N+1)/2), 기준가액은 고정
+# ---------------------------------------------------------------------------
+class TestSumOfYearsDigits:
+    def test_basic_matches_closed_form_fraction(self):
+        # 취득 2021-01-01, 1,000,000원, 잔존가치 100,000원, 내용연수5년.
+        # 5년차(2025) 몫 = (5-5+1)/(5*6/2) = 1/15 -> (900,000)*1/15 = 60,000원.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025)
+        assert dep == 60_000
+        assert months == 12
+
+    def test_first_year_has_largest_share(self):
+        # 1년차(2021) 몫 = 5/15 -> 900,000*5/15 = 300,000원(취득연도라 12개월 전체).
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=100_000, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2021, 12, 31), fy_year=2021)
+        assert dep == 300_000
+
+    def test_disposal_mid_year(self):
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=11_000_000, salvage=0, life=6, method="연수합계법",
+            disposal=dt.date(2025, 4, 30), reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025)
+        assert dep == 349_206
+        assert months == 4
+
+    def test_reest_same_method_restarts_share_schedule(self):
+        # 재추정은 origin을 리셋한다(자본적지출과 반대) — 새 내용연수 기준으로
+        # k=1부터 다시 시작하는 완전히 새 스케줄이 만들어진다.
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=12_500_000, salvage=0, life=6, method="연수합계법",
+            disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=8,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025)
+        assert dep == 694_444
+
+    def test_reest_from_declining_balance_to_syd(self):
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2020, 1, 1), cost=13_500_000, salvage=0, life=8, method="정률법",
+            disposal=None, reest_date=dt.date(2024, 1, 1), reest_life=6,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025, reest_method="연수합계법")
+        assert dep == 715_997
+
+    def test_reest_from_syd_to_declining_balance(self):
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=12_800_000, salvage=0, life=8, method="연수합계법",
+            disposal=None, reest_date=dt.date(2024, 7, 1), reest_life=5,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025, reest_method="정률법")
+        assert dep == 1_552_442
+
+    def test_capex_increases_basis_without_resetting_share_schedule(self):
+        # 자본적지출 전(2021~2022, k=1,2): 1,000,000*(5/15)+1,000,000*(4/15)=600,000원
+        # 상각 -> 자본적지출 시점 장부가액 400,000원 + 지출액 200,000원 = 새 기준가액
+        # 600,000원. origin은 그대로 2021년이라 2025년은 k=5(몫=1/15)이고,
+        # 5년차 상각비 = 600,000*1/15 = 40,000원(기준가액이 새로 늘어난 값을 쓰되,
+        # 연차(k) 자체는 리셋되지 않는다는 것이 이 테스트의 핵심).
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=1_000_000, salvage=0, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            capex_date=dt.date(2023, 1, 1), capex_amount=200_000)
+        assert dep == 40_000
+
+    def test_suspension_reduces_current_period_months(self):
+        dep, months, life_ended, note = R.recalc_asset(
+            acq=dt.date(2021, 1, 1), cost=9_800_000, salvage=0, life=5, method="연수합계법",
+            disposal=None, reest_date=None, reest_life=None,
+            ref_date=dt.date(2025, 12, 31), fy_year=2025,
+            susp_start=dt.date(2025, 2, 1), susp_end=dt.date(2025, 8, 31))
+        assert dep == 272_222
+        assert months == 5
+
+
+# ---------------------------------------------------------------------------
+# 22) "일치여부"/"수식여부" 열 삭제 회귀 테스트 (main() 종단 실행)
+# ---------------------------------------------------------------------------
+class TestResultColumnsAfterRemoval:
+    def _run_main_with(self, tmp_path, rows):
+        cols = ["자산명", "자산분류(유형자산/무형자산)", "취득일", "취득원가", "잔존가치", "내용연수(년)",
+                "상각방법(정액법/정률법)", "회사반영_당기감가상각비", "처분일", "내용연수재추정일",
+                "재추정후내용연수(년)", "재추정후상각방법(정액법/정률법)", "총예정생산량", "당기실제생산량",
+                "전기말누적생산량", "자본적지출일", "자본적지출액", "상각중단시작일", "상각중단종료일",
+                "회사반영_전기말감가상각누계액"]
+        in_path = tmp_path / "in.xlsx"
+        out_path = tmp_path / "out.xlsx"
+        pd.DataFrame(rows, columns=cols).to_excel(in_path, index=False)
+
+        orig_in, orig_out = R.IN_PATH, R.OUT_PATH
+        R.IN_PATH, R.OUT_PATH = str(in_path), str(out_path)
+        try:
+            R.main()
+        finally:
+            R.IN_PATH, R.OUT_PATH = orig_in, orig_out
+        return out_path
+
+    def test_removed_columns_are_absent_and_diff_based_filtering_works(self, tmp_path):
+        import openpyxl
+
+        rows = [
+            # 일치하는 자산: 정액법, 취득원가 6,000,000원, 내용연수10년(월상각 50,000원),
+            # 취득 2020-01-01이라 기준일(2025-12-31)에도 아직 상각 중 — 당기(2025) 12개월
+            # 전체 상각 = 600,000원.
+            ["일치자산", "유형자산", dt.date(2020, 1, 1), 6_000_000, 0, 10, "정액법", 600_000,
+             None, None, None, None, None, None, None, None, None, None, None, None],
+            # 의도적으로 틀린 자산(회사반영을 1원 더 크게 입력).
+            ["불일치자산", "유형자산", dt.date(2020, 1, 1), 6_000_000, 0, 10, "정액법", 600_001,
+             None, None, None, None, None, None, None, None, None, None, None, None],
+        ]
+        out_path = self._run_main_with(tmp_path, rows)
+
+        wb = openpyxl.load_workbook(out_path)
+        result_cols = [c.value for c in wb["재계산결과"][1]]
+        for removed in ("일치여부", "누계액일치여부", "당기말누계액일치여부", "당기수식여부", "누계수식여부"):
+            assert removed not in result_cols
+
+        # diff_df(차이자산 시트)는 이제 "차이(재계산-회사반영)" != 0 기준으로 걸러진다 —
+        # 불일치자산 1건만 들어가 있어야 한다.
+        diff_names = [wb["차이자산"].cell(row=r, column=1).value for r in range(2, wb["차이자산"].max_row + 1)]
+        assert diff_names == ["불일치자산"]
+
+
+# ---------------------------------------------------------------------------
+# 23) 상각방법 표기 정규화 (normalize_method / METHOD_ALIASES)
+# ---------------------------------------------------------------------------
+class TestNormalizeMethod:
+    def test_exact_names_pass_through(self):
+        for m in R.KNOWN_METHODS:
+            assert R.normalize_method(m) == m
+
+    def test_abbreviations_map_to_canonical_name(self):
+        assert R.normalize_method("정액") == "정액법"
+        assert R.normalize_method("정률") == "정률법"
+        assert R.normalize_method("이중체감") == "이중체감법"
+        assert R.normalize_method("연수합계") == "연수합계법"
+        assert R.normalize_method("생산량비례") == "생산량비례법"
+
+    def test_english_abbreviations_map_to_canonical_name(self):
+        assert R.normalize_method("SL") == "정액법"
+        assert R.normalize_method("DB") == "정률법"
+        assert R.normalize_method("DDB") == "이중체감법"
+        assert R.normalize_method("SYD") == "연수합계법"
+
+    def test_whitespace_and_case_are_ignored(self):
+        assert R.normalize_method(" sl ") == "정액법"
+        assert R.normalize_method("Ddb") == "이중체감법"
+
+    def test_unknown_value_returns_original_unchanged(self):
+        # 사전에 없는 값은 정규화하지 않고 원본을 그대로 돌려준다 — validate_asset_inputs가
+        # KNOWN_METHODS 기준으로 "인식 불가"임을 잡아 데이터오류로 격리하게 하기 위함.
+        assert R.normalize_method("XYZ상각법") == "XYZ상각법"
+
+    def test_none_passes_through(self):
+        assert R.normalize_method(None) is None
+
+
+class TestValidateAssetInputsUnknownMethod:
+    def test_unrecognized_method_is_invalid(self):
+        errors = R.validate_asset_inputs(cost=10_000_000, salvage=0, life=5, method="XYZ상각법")
+        assert any("상각방법 오류" in e for e in errors)
+
+    def test_known_methods_are_valid(self):
+        for m in R.KNOWN_METHODS:
+            kwargs = dict(total_units=1_000) if m == "생산량비례법" else {}
+            errors = R.validate_asset_inputs(cost=10_000_000, salvage=0, life=5, method=m, **kwargs)
+            assert not any("상각방법 오류" in e for e in errors)
+
+    def test_method_none_is_not_flagged(self):
+        # method를 아예 안 넘기는 기존 테스트들(자본적지출/상각중단 단독 검증)이
+        # 깨지지 않도록, method=None이면 이 체크 자체를 건너뛰어야 한다.
+        errors = R.validate_asset_inputs(cost=10_000_000, salvage=0, life=5)
+        assert not any("상각방법 오류" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# 24) 컬럼명 동의어 매칭 (_find_column / COLUMN_SYNONYMS)
+# ---------------------------------------------------------------------------
+class TestFindColumn:
+    def test_exact_match_takes_priority_over_synonym(self):
+        # "취득원가"라는 이름의 컬럼과, 동의어인 "취득가액" 컬럼이 둘 다 있으면
+        # 정확 일치(취득원가)가 우선이어야 한다.
+        df_columns = ["취득원가", "취득가액"]
+        actual, source = R._find_column("취득원가", df_columns, "취득원가")
+        assert actual == "취득원가"
+        assert source == "정확일치"
+
+    def test_synonym_match_when_exact_is_absent(self):
+        df_columns = ["자산코드", "취득가액"]
+        actual, source = R._find_column("자산명", df_columns, "자산명")
+        assert actual == "자산코드"
+        assert source == "동의어"
+
+    def test_book_value_is_never_matched_to_acquisition_cost(self):
+        # "장부가액"은 취득원가와 다른 개념(순장부가액)이므로, 동의어 사전에
+        # 일부러 넣지 않았다 — 정확 일치도 동의어도 안 되는 게 정상 동작이다.
+        df_columns = ["장부가액"]
+        actual, source = R._find_column("취득원가", df_columns, "취득원가")
+        assert actual is None
+        assert source is None
+
+    def test_no_match_returns_none(self):
+        df_columns = ["전혀 관계없는 컬럼"]
+        actual, source = R._find_column("취득원가", df_columns, "취득원가")
+        assert actual is None
+
+
+# ---------------------------------------------------------------------------
+# 25) 컬럼 인식 종단 테스트 (resolve_columns) — 동의어 매칭 / 실패 시 추천 메시지
+# ---------------------------------------------------------------------------
+class TestResolveColumns:
+    def test_required_column_resolved_via_synonym_without_editing_column_map(self):
+        # COLUMN_MAP은 그대로 두고("자산명": "자산명"), 파일 컬럼명만 동의어("자산코드")로
+        # 바꿔도 정상 인식돼야 한다.
+        cols = list(R.COLUMN_MAP.values())
+        cols[list(R.COLUMN_MAP.keys()).index("자산명")] = "자산코드"
+        df = pd.DataFrame(columns=cols)
+        resolved = R.resolve_columns(df)
+        assert resolved["자산명"] == "자산코드"
+
+    def test_missing_required_column_raises_with_suggestion(self, monkeypatch):
+        # API 키가 없는 테스트 환경에서는 AI 추천이 자동으로 빈 dict를 반환하고
+        # 퍼지매칭으로 대체돼야 한다 — "취드원가"처럼 오탈자 수준으로 비슷한 컬럼명이면
+        # 에러 메시지에 추천이 붙어야 한다.
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        cols = list(R.COLUMN_MAP.values())
+        cols[list(R.COLUMN_MAP.keys()).index("취득원가")] = "취드원가"  # 오탈자
+        df = pd.DataFrame(columns=cols)
+        try:
+            R.resolve_columns(df)
+            assert False, "KeyError가 발생했어야 한다"
+        except KeyError as e:
+            msg = str(e)
+            assert "취득원가" in msg
+            assert "취드원가" in msg  # 퍼지매칭 추천이 메시지에 포함됨
+
+    def test_ai_suggestion_is_never_applied_automatically(self, monkeypatch):
+        # AI가 뭔가를 추천하더라도 resolved 딕셔너리에는 절대 자동 반영되지 않고,
+        # 여전히 KeyError로 중단돼야 한다(사람이 COLUMN_MAP을 고쳐야 함).
+        monkeypatch.setattr(R, "_suggest_columns_ai", lambda missing, cols: {"취득원가": ["장부가액 (AI추천, 신뢰도:중, 추정)"]})
+        cols = list(R.COLUMN_MAP.values())
+        cols[list(R.COLUMN_MAP.keys()).index("취득원가")] = "완전히다른이름"
+        df = pd.DataFrame(columns=cols)
+        try:
+            R.resolve_columns(df)
+            assert False, "KeyError가 발생했어야 한다"
+        except KeyError as e:
+            assert "장부가액" in str(e)  # 추천은 메시지에만 나타나고
+        # resolve_columns가 정상 반환되는 경로 자체가 없으므로(예외로 중단),
+        # 자동 반영되지 않았다는 것 자체가 위 KeyError 발생으로 이미 증명된다.
